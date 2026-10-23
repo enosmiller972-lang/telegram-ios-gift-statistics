@@ -69,6 +69,10 @@ public class StackedBarsChartController: BaseChartController {
         [barsController, zoomedBarsController].forEach { controller in
             controller.chartFrame = { [unowned self] in self.chartFrame() }
             controller.cartViewBounds = { [unowned self] in self.cartViewBounds() }
+            controller.isSelectionHandled = { [unowned self] in self.selectionHandler != nil }
+            controller.selectionClosure = { [unowned self] info in
+                self.selectionHandler?(info)
+            }
             controller.zoomInOnDateClosure = { [unowned self] date in
                 self.didTapZoomIn(date: date, pointIndex: 0)
             }
@@ -278,6 +282,59 @@ public class StackedBarsChartController: BaseChartController {
         } else {
             return barsController.chartRangeFractionDidUpdated(rangeFraction)
         }
+    }
+    
+    public override func replaceChartsCollection(_ collection: ChartsCollection, animated: Bool) -> Bool {
+        guard !isZoomed, collection.chartValues.count == barsController.chartVisibility.count, collection.axisValues.count > 1 else {
+            return false
+        }
+        let fraction = barsController.currentChartHorizontalRangeFraction
+        barsController.hideDetailsView(animated: false)
+        self.initialChartsCollection = collection
+        barsController.initialize(chartsCollection: collection,
+                                  initialDate: Date(),
+                                  totalHorizontalRange: BaseConstants.defaultRange,
+                                  totalVerticalRange: BaseConstants.defaultRange)
+        switchToChart(chartsCollection: barsController.chartsCollection, isZoomed: false, animated: false)
+        self.setChartRange(fraction, animated: false)
+        return true
+    }
+    
+    public override func setValueLabelsInGutter(_ inGutter: Bool) {
+        barsController.verticalScalesRenderer.labelsInGutter = inGutter
+    }
+    
+    override func giftStyleDidChange() {
+        let on = self.giftStyle
+        barsController.mainBarsRenderer.giftRole = on ? .main : .off
+        barsController.previewBarsChartRenderer.giftRole = on ? .preview : .off
+        barsController.verticalScalesRenderer.giftStyle = on
+        barsController.horizontalScalesRenderer.giftStyle = on
+    }
+    
+    public override func growBars(delay: TimeInterval) {
+        let range = barsController.currentHorizontalMainChartRange
+        let renderer = barsController.mainBarsRenderer
+        if renderer.giftRole != .off {
+            renderer.growGiftBars(peak: renderer.giftVisiblePeak(range: range), delay: delay)
+            return
+        }
+        let visible = barsController.chartBars.locations.filter { $0 >= range.lowerBound && $0 <= range.upperBound }.count
+        renderer.growBars(visibleCount: visible, delay: delay)
+    }
+    
+    public override var plotGeometry: ChartPlotGeometry? {
+        return ChartPlotGeometry(chartFrame: self.chartFrame(), horizontalRange: barsController.currentHorizontalMainChartRange, verticalRange: barsController.currentVerticalMainChartRange)
+    }
+    
+    public override func setChartRange(_ rangeFraction: ClosedRange<CGFloat>, animated: Bool) {
+        guard !isZoomed else {
+            return
+        }
+        barsController.animatesRangeUpdates = animated
+        barsController.chartRangeFractionDidUpdated(rangeFraction)
+        barsController.animatesRangeUpdates = false
+        self.chartRangeUpdatedClosure?(rangeFraction, animated)
     }
     
     public override func apply(theme: ChartTheme, strings: ChartStrings, animated: Bool) {

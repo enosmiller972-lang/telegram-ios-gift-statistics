@@ -47,7 +47,20 @@ class ChartStackSection: UIView, ChartThemeContainer {
     
     var displayRange: Bool = true
     
+    /// For the range slider; the chart gets the style from its controller.
+    var giftStyle: Bool = false {
+        didSet {
+            self.rangeView.giftStyle = self.giftStyle
+            self.visibilityView.giftStyle = self.giftStyle
+            self.chartView.giftStyle = self.giftStyle
+            if let theme = self.theme, let strings = self.strings {
+                self.rangeView.apply(theme: theme, strings: strings, animated: false)
+            }
+        }
+    }
+    
     let hapticFeedback = HapticFeedback()
+    var userDidChangeRange: (() -> Void)?
     
     init() {
         sectionContainerView = UIView()
@@ -95,6 +108,42 @@ class ChartStackSection: UIView, ChartThemeContainer {
         backButton.isExclusiveTouch = true
         
         backButton.setVisible(false, animated: false)
+    }
+    
+    private var revealMask: CAGradientLayer?
+    
+    func setPlotReveal(_ progress: CGFloat?) {
+        guard let progress, progress < 1.0 else {
+            self.chartView.layer.mask = nil
+            self.revealMask = nil
+            return
+        }
+        let mask: CAGradientLayer
+        if let current = self.revealMask {
+            mask = current
+        } else {
+            mask = CAGradientLayer()
+            mask.startPoint = CGPoint(x: 0.0, y: 0.5)
+            mask.endPoint = CGPoint(x: 1.0, y: 0.5)
+            mask.colors = [UIColor.black.cgColor, UIColor.black.cgColor, UIColor.clear.cgColor]
+            self.revealMask = mask
+            self.chartView.layer.mask = mask
+        }
+        // The renderer cuts the stroke itself; this mask only reveals grid and labels, ahead of the head so the dot glow isn't clipped.
+        let bounds = self.chartView.bounds
+        let frame = self.chartView.chartFrame
+        let width = max(1.0, bounds.width)
+        let soft: CGFloat = 40.0
+        let ahead = 20.0 * min(1.0, progress / 0.05)
+        let opaqueX = frame.minX + progress * (frame.width + max(0.0, bounds.width + 20.0 - frame.maxX)) + ahead
+        let clearX = opaqueX + soft * min(1.0, progress / 0.05)
+        let edge = max(0.0, min(1.0, clearX / width))
+        let opaque = max(0.0, min(1.0, opaqueX / width))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.frame = bounds
+        mask.locations = [0.0, NSNumber(value: Double(opaque)), NSNumber(value: Double(max(edge, opaque)))]
+        CATransaction.commit()
     }
     
     public func resetDetailsView() {
@@ -229,8 +278,9 @@ class ChartStackSection: UIView, ChartThemeContainer {
         }
         
         self.rangeView.chartView.renderers = controller.navigationRenderers
-        self.rangeView.rangeDidChangeClosure = { range in
+        self.rangeView.rangeDidChangeClosure = { [weak self] range in
             controller.updateChartRange(range)
+            self?.userDidChangeRange?()
         }
         self.rangeView.touchedOutsideClosure = {
             controller.cancelChartInteraction()

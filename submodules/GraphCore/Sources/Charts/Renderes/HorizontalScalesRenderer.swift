@@ -20,6 +20,11 @@ class HorizontalScalesRenderer: BaseChartRenderer {
     var labelsVerticalOffset: CGFloat = 8
     var labelsFont: NSFont = .systemFont(ofSize: 11)
     var labelsColor: GColor = .gray
+    var giftStyle: Bool = false {
+        didSet {
+            self.labelsFont = self.giftStyle ? .systemFont(ofSize: 10) : .systemFont(ofSize: 11)
+        }
+    }
     
     func setup(labels: [LinesChartLabel], animated: Bool) {
         if animated {
@@ -92,7 +97,7 @@ class HorizontalScalesRenderer: BaseChartRenderer {
                 }
             }
         }
-        let labelColorAlpha = labelsColor.alphaValue * itemsAlpha
+        let labelColorAlpha = labelsColor.alphaValue * itemsAlpha * (giftStyle ? 0.75 : 1.0)
         drawHorizontalLabels(horizontalLabels, color: labelsColor.withAlphaComponent(labelColorAlpha * itemsAlpha))
         for animation in animatedHorizontalLabels {
             let color = labelsColor.withAlphaComponent(animation.alphaAnimator.current * labelColorAlpha)

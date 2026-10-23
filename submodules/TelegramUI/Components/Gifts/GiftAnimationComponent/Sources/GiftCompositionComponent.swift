@@ -46,6 +46,8 @@ public final class GiftCompositionComponent: Component {
     let revealedAttributes: Set<StarGift.UniqueGift.Attribute.AttributeType>
     let externalState: ExternalState?
     let requestUpdate: (ComponentTransition) -> Void
+    /// False when the host draws the backdrop itself; only the model is drawn then.
+    let drawsBackground: Bool
     
     public init(
         context: AccountContext,
@@ -59,8 +61,10 @@ public final class GiftCompositionComponent: Component {
         topBackgroundExtension: CGFloat = 0.0,
         revealedAttributes: Set<StarGift.UniqueGift.Attribute.AttributeType> = Set(),
         externalState: ExternalState? = nil,
+        drawsBackground: Bool = true,
         requestUpdate: @escaping (ComponentTransition) -> Void = { _ in }
     ) {
+        self.drawsBackground = drawsBackground
         self.context = context
         self.theme = theme
         self.subject = subject
@@ -97,6 +101,9 @@ public final class GiftCompositionComponent: Component {
         if lhs.animateScaleOnTransition != rhs.animateScaleOnTransition {
             return false
         }
+        if lhs.drawsBackground != rhs.drawsBackground {
+            return false
+        }
         if lhs.topBackgroundExtension != rhs.topBackgroundExtension {
             return false
         }
@@ -114,6 +121,65 @@ public final class GiftCompositionComponent: Component {
         
         private let background = ComponentView<Empty>()
         private var animationNode: AnimatedStickerNode?
+        
+        public var stickerView: UIView? {
+            return self.animationNode?.view
+        }
+
+        private var finishLink: SharedDisplayLinkDriver.Link?
+
+        /// Plays the sticker to the end of the current loop and stops there, sped up to fit `maximumDuration`.
+        /// `completion` is called once stopped (immediately if nothing is playing).
+        public func finishAnimation(maximumDuration: Double, completion: @escaping () -> Void) {
+            guard let node = self.animationNode as? DefaultAnimatedStickerNodeImpl, node.isPlaying, node.currentFrameCount > 1, node.currentFrameRate > 0 else {
+                completion()
+                return
+            }
+            let count = node.currentFrameCount
+            let rate = Double(node.currentFrameRate)
+            let start = node.currentFrameIndex
+            let last = count - 1
+            let remaining = Double(last - start) / rate
+            var isDone = false
+            let done: () -> Void = {
+                if !isDone {
+                    isDone = true
+                    completion()
+                }
+            }
+            if remaining <= maximumDuration {
+                node.stopAtNearestLoop = true
+                node.completed = { stopped in
+                    if stopped {
+                        done()
+                    }
+                }
+                Queue.mainQueue().after(remaining + 0.25, done)
+                return
+            }
+            let speed = remaining / maximumDuration
+            let startTime = CACurrentMediaTime()
+            var shown = start
+            self.finishLink?.invalidate()
+            self.finishLink = SharedDisplayLinkDriver.shared.add(framesPerSecond: .max, { [weak self, weak node] _ in
+                guard let self, let node else {
+                    done()
+                    return
+                }
+                let elapsed = CACurrentMediaTime() - startTime
+                let target = min(last, start + Int(elapsed * speed * rate))
+                if target != shown {
+                    shown = target
+                    node.seekTo(.frameIndex(target))
+                }
+                if target >= last {
+                    self.finishLink?.invalidate()
+                    self.finishLink = nil
+                    // The last frame renders slightly after it is requested.
+                    Queue.mainQueue().after(0.05, done)
+                }
+            })
+        }
         
         private var disposables = DisposableSet()
         private var fetchedFiles = Set<Int64>()
@@ -797,7 +863,7 @@ public final class GiftCompositionComponent: Component {
                 animateTransition = true
             }
             
-            if let backgroundColor {
+            if let backgroundColor, component.drawsBackground {
                 var backgroundTransition = transition
                 if let backgroundView = self.background.view as? PeerInfoCoverComponent.View {
                     if animateTransition {

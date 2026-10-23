@@ -41,7 +41,7 @@ swift_library(
         "//submodules/TelegramUI/Components/AnimatedTextComponent",
         "//submodules/TelegramUI/Components/NavigationStackComponent",
         "//submodules/TelegramUI/Components/LottieComponent",
-        "//submodules/TelegramUI/Components/PeerInfo/PeerInfoCoverComponent",
+        "//submodules/TelegramUI/Components/Gifts/GiftCraftBackdrop",
         "//submodules/Components/MultilineTextWithEntitiesComponent",
         "//submodules/TooltipUI",
         "//submodules/TextFormat",

@@ -28,7 +28,7 @@ class LinesChartRenderer: BaseChartRenderer {
     }
     private lazy var linesShapeAnimator = AnimationController<Double>(current: 1, refreshClosure: self.refreshClosure)
     private var fromLines: [LineData] = []
-    private var toLines: [LineData] = []
+    private(set) var toLines: [LineData] = []
     
     func setLines(lines: [LineData], animated: Bool) {
         if toLines.count != lines.count {
@@ -49,6 +49,42 @@ class LinesChartRenderer: BaseChartRenderer {
         }
     }
     
+    /// Gradient fill under the first line.
+    lazy var areaAnimator = AnimationController<CGFloat>(current: 0, refreshClosure: self.refreshClosure)
+    static let areaOpacity: CGFloat = 0.30
+    
+    var giftRole: GiftChartRole = .off
+    static let giftPointSpacing: CGFloat = 3.0
+    lazy var pulseAnimator = AnimationController<CGFloat>(current: 1, refreshClosure: self.refreshClosure)
+    /// Last drawn frame; the dots read it so they sit exactly on the drawn line.
+    var giftState = GiftChartLineState()
+    
+    func setAreaVisible(_ visible: Bool, animated: Bool) {
+        if animated {
+            areaAnimator.animate(to: visible ? 1 : 0, duration: 0.6, timeFunction: .easeInOut)
+        } else {
+            areaAnimator.set(current: visible ? 1 : 0)
+        }
+    }
+    
+    /// Visible points plus one before, in chart coordinates.
+    private func chartPoints(of line: LineData, range: ClosedRange<CGFloat>, chartFrame: CGRect) -> [CGPoint] {
+        guard var index = line.points.firstIndex(where: { $0.x >= range.lowerBound }) else {
+            return []
+        }
+        index = max(0, index - 1)
+        var result: [CGPoint] = []
+        while index < line.points.count {
+            let point = line.points[index]
+            result.append(transform(toChartCoordinate: point, chartFrame: chartFrame))
+            if point.x > range.upperBound {
+                break
+            }
+            index += 1
+        }
+        return result
+    }
+    
     func setLineVisible(_ isVisible: Bool, at index: Int, animated: Bool) {
         if linesAlphaAnimators.count > index {
             linesAlphaAnimators[index].animate(to: isVisible ? 1 : 0, duration: animated ? .defaultDuration : 0)
@@ -64,7 +100,9 @@ class LinesChartRenderer: BaseChartRenderer {
         let spacing: CGFloat = 1.0
         context.clip(to: CGRect(origin: CGPoint(x: 0.0, y: chartFrame.minY - spacing), size: CGSize(width: chartFrame.width + chartFrame.origin.x * 2.0, height: chartFrame.height + spacing * 2.0)))
         
+        self.giftState.fits = []
         for (index, toLine) in toLines.enumerated() {
+            let lineIndex = index
             let alpha = linesAlphaAnimators[index].current * chartsAlpha
             if alpha == 0 { continue }
             context.setAlpha(alpha)
@@ -317,8 +355,12 @@ class LinesChartRenderer: BaseChartRenderer {
                     lines.removeLast()
                 }
                 
-                context.setLineCap(.round)
-                context.strokeLineSegments(between: lines)
+                if self.giftRole != .off {
+                    self.drawGiftLine(context: context, chartPoints: combinedPoints, lineIndex: lineIndex, color: toLine.color, chartFrame: chartFrame)
+                } else {
+                    context.setLineCap(.round)
+                    context.strokeLineSegments(between: lines)
+                }
             } else {                
                 if var index = toLine.points.firstIndex(where: { $0.x >= range.lowerBound }) {
                     var lines: [CGPoint] = []
@@ -434,8 +476,12 @@ class LinesChartRenderer: BaseChartRenderer {
                         lines.removeLast()
                     }
                     
-                    context.setLineCap(.round)
-                    context.strokeLineSegments(between: lines)
+                    if self.giftRole != .off {
+                        self.drawGiftLine(context: context, chartPoints: self.chartPoints(of: toLine, range: range, chartFrame: chartFrame), lineIndex: lineIndex, color: toLine.color, chartFrame: chartFrame)
+                    } else {
+                        context.setLineCap(.round)
+                        context.strokeLineSegments(between: lines)
+                    }
                 }
             }
             context.endTransparencyLayer()
@@ -443,6 +489,9 @@ class LinesChartRenderer: BaseChartRenderer {
         }
         
         context.resetClip()
+        if self.giftRole == .main, let first = linesAlphaAnimators.first {
+            self.drawGiftDot(context: context, chartFrame: chartFrame, alpha: first.current * chartsAlpha)
+        }
     }
 }
 

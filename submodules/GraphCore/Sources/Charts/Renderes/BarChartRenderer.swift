@@ -57,14 +57,43 @@ class BarChartRenderer: BaseChartRenderer {
         }
     }
 
-    private var selectedBarIndex: Int? {
+    /// Staggered left-to-right bar growth; `growthClock` runs 0...1. The gift style uses `growGiftBars` instead.
+    lazy var growthClock = AnimationController<CGFloat>(current: 1, refreshClosure: self.refreshClosure)
+    var growthDuration: TimeInterval = 1.0
+    var growthDelay: TimeInterval = 0.0
+    /// Tallest visible bar when the gift growth started; lower bars start later.
+    var giftGrowthPeak: CGFloat = 0.0
+    private static let growthStagger: TimeInterval = 0.025
+    var growthStaggerStep: TimeInterval = BarChartRenderer.growthStagger
+    private static let growthBarDuration: TimeInterval = 0.55
+    
+    func growBars(visibleCount: Int, delay: TimeInterval) {
+        growthDelay = delay
+        growthStaggerStep = BarChartRenderer.growthStagger
+        growthDuration = delay + BarChartRenderer.growthBarDuration + growthStaggerStep * Double(max(1, visibleCount))
+        growthClock.set(current: 0)
+        growthClock.animate(to: 1, duration: growthDuration, timeFunction: .linear)
+    }
+    
+    func barGrowth(ordinal: Int) -> CGFloat {
+        let clock = growthClock.current
+        if clock >= 1 { return 1 }
+        let time = Double(clock) * growthDuration - growthDelay - Double(max(0, ordinal)) * growthStaggerStep
+        if time <= 0 { return 0 }
+        let x = min(1.0, time / BarChartRenderer.growthBarDuration)
+        if x >= 1 { return 1 }
+        // Damped spring with ~8% overshoot.
+        return CGFloat(1.0 - exp(-6.5 * x) * cos(9.5 * x))
+    }
+    
+    var selectedBarIndex: Int? {
         didSet {
             setNeedsDisplay()
         }
     }
     var generalUnselectedAlpha: CGFloat = 0.5
     
-    private var componentsAnimators: [AnimationController<CGFloat>] = []
+    var componentsAnimators: [AnimationController<CGFloat>] = []
     var bars: BarsData = BarsData(barWidth: 1, locations: [], components: []) {
         willSet {
             if bars.components.count != newValue.components.count {
@@ -72,8 +101,20 @@ class BarChartRenderer: BaseChartRenderer {
             }
         }
         didSet {
+            self.giftLevelsStorage = nil
             setNeedsDisplay()
         }
+    }
+    
+    var giftRole: GiftChartRole = .off
+    var giftLevelsStorage: GiftChartBarLevels?
+    var giftLevels: GiftChartBarLevels {
+        if let levels = self.giftLevelsStorage {
+            return levels
+        }
+        let levels = GiftChartBarLevels(bars: self.bars)
+        self.giftLevelsStorage = levels
+        return levels
     }
     
     func setComponentVisible(_ isVisible: Bool, at index: Int, animated: Bool) {
@@ -93,6 +134,11 @@ class BarChartRenderer: BaseChartRenderer {
         guard isEnabled && verticalRange.current.distance > 0 && verticalRange.current.distance > 0 else { return }
         let chartsAlpha = chartAlphaAnimator.current
         if chartsAlpha == 0 { return }
+
+        if self.giftRole != .off {
+            self.renderGiftBars(context: context, bounds: bounds, chartFrame: chartFrame, alpha: chartsAlpha)
+            return
+        }
 
         let range = renderRange(bounds: bounds, chartFrame: chartFrame)
 
@@ -216,6 +262,7 @@ class BarChartRenderer: BaseChartRenderer {
                 } else {
                     var selectedPaths: [[CGRect]] = bars.components.map { _ in [] }
                     barIndex = max(0, barIndex - 1)
+                    let firstBarIndex = barIndex
                     
                     var currentLocation = bars.locations[barIndex]
                     var leftX = transform(toChartCoordinateHorizontal: currentLocation - bars.barWidth, chartFrame: chartFrame)
@@ -241,7 +288,7 @@ class BarChartRenderer: BaseChartRenderer {
                             let visibilityPercent = componentsAnimators[index].current
                             if visibilityPercent == 0 { continue }
                             
-                            let height = component.values[barIndex] * visibilityPercent
+                            let height = component.values[barIndex] * visibilityPercent * self.barGrowth(ordinal: barIndex - firstBarIndex)
                             stackedValue += height
                             let topY = transform(toChartCoordinateVertical: stackedValue, chartFrame: chartFrame)
                             let componentHeight = (bottomY - topY)

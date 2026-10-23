@@ -18,7 +18,7 @@ private enum Constants {
 }
 
 public class GeneralLinesChartController: BaseLinesChartController {
-    private let initialChartCollection: ChartsCollection
+    private var initialChartCollection: ChartsCollection
 
     private let mainLinesRenderer = LinesChartRenderer()
     private let horizontalScalesRenderer = HorizontalScalesRenderer()
@@ -36,6 +36,14 @@ public class GeneralLinesChartController: BaseLinesChartController {
     private(set) var chartLines: [LinesChartRenderer.LineData] = []
     
     public var min5 = false
+
+    /// Widens a zero-width range (single point or flat line) by one unit, since the chart divides by range widths.
+    private static func nonEmpty(_ range: ClosedRange<CGFloat>) -> ClosedRange<CGFloat> {
+        guard range.lowerBound.isFinite, range.upperBound.isFinite else {
+            return Constants.defaultRange
+        }
+        return range.upperBound - range.lowerBound > 0.0 ? range : range.lowerBound ... (range.upperBound + 1.0)
+    }
 
     override public init(chartsCollection: ChartsCollection)  {
         self.initialChartCollection = chartsCollection
@@ -61,16 +69,16 @@ public class GeneralLinesChartController: BaseLinesChartController {
         }
         
         self.prevoiusHorizontalStrideInterval = -1
-        self.totalVerticalRange = LinesChartRenderer.LineData.verticalRange(lines: chartLines) ?? Constants.defaultRange
-        self.totalHorizontalRange = LinesChartRenderer.LineData.horizontalRange(lines: chartLines) ?? Constants.defaultRange
+        self.totalVerticalRange = GeneralLinesChartController.nonEmpty(LinesChartRenderer.LineData.verticalRange(lines: chartLines) ?? Constants.defaultRange)
+        self.totalHorizontalRange = GeneralLinesChartController.nonEmpty(LinesChartRenderer.LineData.horizontalRange(lines: chartLines) ?? Constants.defaultRange)
         self.lineBulletsRenderer.bullets = self.chartLines.map { LineBulletsRenderer.Bullet(coordinate: $0.points.first ?? .zero, offset: .zero,
                                                                                           color: $0.color)}
 
         let chartRange: ClosedRange<CGFloat>
         if isZoomed {
-            chartRange = zoomedChartRange
+            chartRange = GeneralLinesChartController.nonEmpty(zoomedChartRange)
         } else {
-            chartRange = initialChartRange
+            chartRange = GeneralLinesChartController.nonEmpty(initialChartRange)
         }
 
         self.previewLinesRenderer.setup(horizontalRange: totalHorizontalRange, animated: animated)
@@ -139,6 +147,22 @@ public class GeneralLinesChartController: BaseLinesChartController {
         let chartInteractionWasBegin = isChartInteractionBegun
         super.chartInteractionDidBegin(point: point)
 
+        if let handler = self.selectionHandler {
+            let isNewPoint = self.selectedPointIndex != minIndex
+            self.selectedPointIndex = minIndex
+            let collection = self.actualChartsCollection
+            handler(ChartSelectionInfo(
+                index: minIndex,
+                date: closestDate,
+                values: collection.chartValues.map { $0.values[minIndex] },
+                names: collection.chartValues.map { $0.name },
+                colors: collection.chartValues.map { $0.color },
+                fingerFraction: point.x,
+                isNewPoint: isNewPoint
+            ))
+            return
+        }
+
         self.lineBulletsRenderer.bullets = chartLines.compactMap { chart in
             return LineBulletsRenderer.Bullet(coordinate: chart.points[minIndex], offset: .zero, color: chart.color)
         }
@@ -157,6 +181,31 @@ public class GeneralLinesChartController: BaseLinesChartController {
     }
     
     
+    public override func replaceChartsCollection(_ collection: ChartsCollection, animated: Bool) -> Bool {
+        guard collection.chartValues.count == chartVisibility.count, collection.axisValues.count > 1 else {
+            return false
+        }
+        cancelChartInteraction()
+        self.initialChartCollection = collection
+        // Keep the visible range; setup reads it from `initialChartRange`.
+        self.initialChartRange = self.currentHorizontalRange
+        self.setupChartCollection(chartsCollection: collection, animated: animated, isZoomed: false)
+        return true
+    }
+
+    public override func setChartRange(_ rangeFraction: ClosedRange<CGFloat>, animated: Bool) {
+        cancelChartInteraction()
+        let horizontalRange = ClosedRange(uncheckedBounds:
+            (lower: totalHorizontalRange.lowerBound + rangeFraction.lowerBound * totalHorizontalRange.distance,
+             upper: totalHorizontalRange.lowerBound + rangeFraction.upperBound * totalHorizontalRange.distance))
+        zoomedChartRange = horizontalRange
+        updateChartRangeTitle(animated: animated)
+        updateMainChartHorizontalRange(range: horizontalRange, animated: animated)
+        updateHorizontalLimits(horizontalRange: horizontalRange, animated: animated)
+        updateVerticalLimitsAndRange(horizontalRange: horizontalRange, animated: animated)
+        self.chartRangeUpdatedClosure?(rangeFraction, animated)
+    }
+
     public override var currentChartHorizontalRangeFraction: ClosedRange<CGFloat> {
         let lowerPercent = (currentHorizontalRange.lowerBound - totalHorizontalRange.lowerBound) / totalHorizontalRange.distance
         let upperPercent = (currentHorizontalRange.upperBound - totalHorizontalRange.lowerBound) / totalHorizontalRange.distance
@@ -167,8 +216,54 @@ public class GeneralLinesChartController: BaseLinesChartController {
         return mainLinesRenderer.horizontalRange.end
     }
 
+    private var selectedPointIndex: Int?
+
+    public override func chartInteractionDidEnd() {
+        super.chartInteractionDidEnd()
+        if let handler = self.selectionHandler, self.selectedPointIndex != nil {
+            self.selectedPointIndex = nil
+            handler(nil)
+        }
+    }
+
+    public override var plotGeometry: ChartPlotGeometry? {
+        return ChartPlotGeometry(chartFrame: self.chartFrame(), horizontalRange: self.mainLinesRenderer.horizontalRange.current, verticalRange: self.mainLinesRenderer.verticalRange.current)
+    }
+
+    public override func setValueLabelsInGutter(_ inGutter: Bool) {
+        self.verticalScalesRenderer.labelsInGutter = inGutter
+    }
+
+    override func giftStyleDidChange() {
+        let on = self.giftStyle
+        self.mainLinesRenderer.giftRole = on ? .main : .off
+        self.previewLinesRenderer.giftRole = on ? .preview : .off
+        self.verticalScalesRenderer.giftStyle = on
+        self.horizontalScalesRenderer.giftStyle = on
+    }
+
+    public override func pulseLastPoint() {
+        self.mainLinesRenderer.playPulse()
+    }
+
+    public override func setPlotReveal(_ progress: CGFloat?) {
+        self.mainLinesRenderer.setGiftReveal(progress)
+    }
+
+    public override func giftCurvePoint(lineIndex: Int, x: CGFloat) -> CGPoint? {
+        return self.mainLinesRenderer.giftCurvePoint(lineIndex: lineIndex, x: x)
+    }
+
+    public override func setAreaFill(_ visible: Bool, animated: Bool) {
+        self.mainLinesRenderer.setAreaVisible(visible, animated: animated)
+    }
+
     public override func cancelChartInteraction() {
         super.cancelChartInteraction()
+        if let handler = self.selectionHandler, self.selectedPointIndex != nil {
+            self.selectedPointIndex = nil
+            handler(nil)
+        }
         self.lineBulletsRenderer.isEnabled = false
         
         self.setDetailsChartVisibleClosure?(false, true)

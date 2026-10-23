@@ -203,7 +203,33 @@ class GeneralChartComponentController: ChartThemeContainer {
     }
     
     var detailsVisible = false
+    /// See `BaseChartController.selectionHandler`.
+    var selectionClosure: ((BaseChartController.ChartSelectionInfo?) -> Void)?
+    var isSelectionHandled: () -> Bool = { false }
+    var lastSelectedIndex: Int?
+    /// Maps a point selection to its bar group for grouped gift-style bars.
+    var selectionInfoTransform: ((BaseChartController.ChartSelectionInfo) -> BaseChartController.ChartSelectionInfo)?
+    
     func showDetailsView(at chartPosition: CGFloat, detailsViewPosition: CGFloat, dataIndex: Int, date: Date, animated: Bool, feedback: Bool) {
+        if isSelectionHandled() {
+            let isNewPoint = lastSelectedIndex != dataIndex
+            lastSelectedIndex = dataIndex
+            var info = BaseChartController.ChartSelectionInfo(
+                index: dataIndex,
+                date: date,
+                values: chartsCollection.chartValues.map { $0.values[dataIndex] },
+                names: chartsCollection.chartValues.map { $0.name },
+                colors: chartsCollection.chartValues.map { $0.color },
+                fingerFraction: lastChartInteractionPoint.x,
+                isNewPoint: isNewPoint
+            )
+            if let transform = selectionInfoTransform {
+                info = transform(info)
+            }
+            selectionClosure?(info)
+            detailsVisible = true
+            return
+        }
         setDetailsViewModel?(chartDetailsViewModel(closestDate: date, pointIndex: dataIndex, currency: self.currency, rate: self.conversionRate), animated, feedback)
         setDetailsChartVisibleClosure?(true, true)
         setDetailsViewPositionClosure?(detailsViewPosition)
@@ -214,9 +240,16 @@ class GeneralChartComponentController: ChartThemeContainer {
         isChartInteracting = false
         ignoreInteraction = false
         currentChartValue = nil
+        if isSelectionHandled(), detailsVisible {
+            hideDetailsView(animated: true)
+        }
     }
 
     func hideDetailsView(animated: Bool) {
+        if isSelectionHandled(), lastSelectedIndex != nil {
+            lastSelectedIndex = nil
+            selectionClosure?(nil)
+        }
         isChartInteractionBegun = false
         setDetailsChartVisibleClosure?(false, animated)
         detailsVisible = false

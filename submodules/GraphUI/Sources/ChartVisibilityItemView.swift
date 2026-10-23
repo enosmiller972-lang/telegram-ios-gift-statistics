@@ -50,7 +50,11 @@ class ChartVisibilityItemView: UIView {
         }
         UIView.perform(animated: animated, animations: {
             if self.isChecked {
-                self.checkButton.setTitleColor(.white, for: .normal)
+                // Light series colors get a dark title.
+                var white: CGFloat = 0.0
+                var alpha: CGFloat = 0.0
+                let isLight = self.giftStyle && item.color.getWhite(&white, alpha: &alpha) && white > 0.85
+                self.checkButton.setTitleColor(isLight ? UIColor(white: 0.1, alpha: 0.85) : .white, for: .normal)
                 self.checkButton.backgroundColor = item.color
                 self.checkButton.layer.borderColor = nil
                 self.checkButton.layer.borderWidth = 0
@@ -79,6 +83,14 @@ class ChartVisibilityItemView: UIView {
     @objc private func didRecognizedLongPress(recognizer: UIGestureRecognizer) {
         if recognizer.state == .began {
             longTapClosure?()
+        }
+    }
+    
+    var giftStyle: Bool = false {
+        didSet {
+            if self.giftStyle != oldValue {
+                self.updateStyle(animated: false)
+            }
         }
     }
     

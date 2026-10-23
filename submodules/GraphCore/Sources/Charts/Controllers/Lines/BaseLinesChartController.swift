@@ -62,8 +62,8 @@ public class BaseLinesChartController: BaseChartController {
             let stirng = BaseConstants.headerFullZoomedFormatter.string(from: fromDate)
             self.setChartTitleClosure?(stirng, animated)
         } else {
-            let stirng = "\(BaseConstants.headerMediumRangeFormatter.string(from: fromDate)) - \(BaseConstants.headerMediumRangeFormatter.string(from: toDate))"
-            self.setChartTitleClosure?(stirng, animated)
+            let stirng = self.giftStyle ? BaseChartController.giftRangeTitle?(fromDate, toDate) : nil
+            self.setChartTitleClosure?(stirng ?? "\(BaseConstants.headerMediumRangeFormatter.string(from: fromDate)) - \(BaseConstants.headerMediumRangeFormatter.string(from: toDate))", animated)
         }
     }
     
@@ -108,7 +108,7 @@ public class BaseLinesChartController: BaseChartController {
             let (index, component) = arg
             return ChartDetailsViewModel.Value(prefix: nil,
                                                title: component.name,
-                                               value: BaseConstants.detailsNumberFormatter.string(from: component.values[pointIndex]),
+                                               value: valueFormat?.string(from: component.values[pointIndex]) ?? BaseConstants.detailsNumberFormatter.string(from: component.values[pointIndex]),
                                                color: component.color,
                                                visible: actualChartVisibility[index])
         }
@@ -232,7 +232,7 @@ public class BaseLinesChartController: BaseChartController {
         let numberFormatter = BaseConstants.chartNumberFormatter
         numberFormatter.maximumFractionDigits = maximumNumberOfDecimals
         while verticalValue < verticalRange.upperBound {
-            let text: String = numberFormatter.string(from: NSNumber(value: Double(verticalValue))) ?? ""
+            let text: String = valueFormat?.string(from: verticalValue) ?? numberFormatter.string(from: NSNumber(value: Double(verticalValue))) ?? ""
             
             verticalLabels.append(LinesChartLabel(value: verticalValue, text: text))
             verticalValue += base

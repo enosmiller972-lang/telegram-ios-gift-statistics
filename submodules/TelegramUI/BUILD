@@ -158,6 +158,8 @@ swift_library(
         "//submodules/PasswordSetupUI:PasswordSetupUI",
         "//submodules/Pdf:Pdf",
         "//submodules/InstantPageUI:InstantPageUI",
+        "//submodules/GiftStats:GiftStats",
+        "//submodules/GiftStatsPreview:GiftStatsPreview",
         "//submodules/MusicAlbumArtResources:MusicAlbumArtResources",
         "//submodules/LiveLocationPositionNode:LiveLocationPositionNode",
         "//submodules/MosaicLayout:MosaicLayout",

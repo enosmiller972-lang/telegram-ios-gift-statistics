@@ -120,6 +120,7 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
         })
         
         if context.sharedContext.applicationBindings.isMainApp {
+            GiftStatsPreviewInstaller.install(context: context)
             self.applicationInFocusDisposable = (context.sharedContext.applicationBindings.applicationIsActive
             |> distinctUntilChanged
             |> deliverOn(Queue.mainQueue())).startStrict(next: { value in

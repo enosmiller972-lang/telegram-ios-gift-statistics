@@ -53,6 +53,9 @@ import Pasteboard
 import Speak
 import TranslateUI
 import TelegramUIPreferences
+import GiftStats
+import GiftStatsScreen
+import GiftCardStyle
 
 private let giftViewTopOverscrollBackgroundHeight: CGFloat = 250.0
 
@@ -308,18 +311,20 @@ private final class SelectableGiftMessageTextComponent: Component {
     }
 }
 
-private final class GiftViewSheetContent: CombinedComponent {
+final class GiftViewSheetContent: CombinedComponent {
     typealias EnvironmentType = ViewControllerComponentContainer.Environment
 
     final class ExternalState {
         fileprivate var topOverscrollBackgroundColor: UIColor?
         fileprivate var topOverscrollBackgroundTransition: ComponentTransition = .immediate
-        fileprivate var controlPanel: GlassControlPanelComponent?
+        fileprivate var controlPanel: AnyComponent<Empty>?
         fileprivate var controlPanelTransition: ComponentTransition = .immediate
         fileprivate var button: ButtonComponent?
         fileprivate var buttonTransition: ComponentTransition = .immediate
         fileprivate var upgradeNextButton: PlainButtonComponent?
         fileprivate var upgradePriceButton: PlainButtonComponent?
+        /// Set by the hosting card so the request reaches that card, not another pager page.
+        fileprivate var statsEntry: ((GiftViewStatsRequest) -> Void)?
     }
     
     let context: AccountContext
@@ -362,13 +367,13 @@ private final class GiftViewSheetContent: CombinedComponent {
         let symbolButtonTag = GenericComponentViewTag()
         let statusTag = GenericComponentViewTag()
         
-        private let context: AccountContext
+        let context: AccountContext
         private(set) var subject: GiftViewScreen.Subject
         var justUpgraded = false
         var revealedAttributes = Set<StarGift.UniqueGift.Attribute.AttributeType>()
         var revealedNumberDigits: Int = 0
         
-        private let getController: () -> ViewController?
+        let getController: () -> ViewController?
         
         private var disposable: Disposable?
         var initialized = false
@@ -435,6 +440,18 @@ private final class GiftViewSheetContent: CombinedComponent {
         private let starsTopUpOptionsPromise = ValuePromise<[StarsTopUpOption]?>(nil)
         
         private let animateOut: ActionSlot<Action<()>>
+        var giftStats: GiftStats?
+        var giftStatsDisposable: Disposable?
+        /// Prefetched with the model stats so switching to the collection is instant.
+        var giftCollectionStats: GiftStats?
+        var giftCollectionStatsDisposable: Disposable?
+        /// From `getUniqueStarGiftValueInfo`; the stats row waits for it so it shows Telegram's price (see `GiftStatsValueHeader`).
+        var giftValueInfo: StarGift.UniqueGift.ValueInfo?
+        var isGiftValueInfoResolved = false
+        var giftValueInfoDisposable: Disposable?
+        let giftStatsRowTag = GenericComponentViewTag()
+        /// See `ExternalState.statsEntry`.
+        var statsEntry: ((GiftViewStatsRequest) -> Void)?
         
         init(
             context: AccountContext,
@@ -448,6 +465,8 @@ private final class GiftViewSheetContent: CombinedComponent {
             self.getController = getController
             
             super.init()
+            
+            self.startGiftStatsUpdates()
             
             if let arguments = subject.arguments {
                 if let upgradeStars = arguments.upgradeStars, upgradeStars > 0, !arguments.nameHidden && !arguments.upgradeSeparate {
@@ -657,6 +676,9 @@ private final class GiftViewSheetContent: CombinedComponent {
         }
         
         deinit {
+            self.giftStatsDisposable?.dispose()
+            self.giftCollectionStatsDisposable?.dispose()
+            self.giftValueInfoDisposable?.dispose()
             self.disposable?.dispose()
             self.upgradePreviewDisposable.dispose()
             self.upgradePreviewTimer?.invalidate()
@@ -1950,7 +1972,13 @@ private final class GiftViewSheetContent: CombinedComponent {
             guard let controller = self.getController() as? GiftViewScreen else {
                 return
             }
-            guard let controlsView = controller.node.hostView.findTaggedView(tag: self.controlButtonsTag) as? GlassControlPanelComponent.View, let rightItemView = controlsView.rightItemView, let sourceView = rightItemView.itemView(id: AnyHashable("more")) else {
+            let taggedView = controller.node.hostView.findTaggedView(tag: self.controlButtonsTag)
+            let sourceView: UIView
+            if let cornerButtons = taggedView as? GiftCardCornerButtonsComponent.View, let moreView = cornerButtons.button(id: AnyHashable("more")) {
+                sourceView = moreView
+            } else if let controlsView = taggedView as? GlassControlPanelComponent.View, let rightItemView = controlsView.rightItemView, let itemView = rightItemView.itemView(id: AnyHashable("more")) {
+                sourceView = itemView
+            } else {
                 return
             }
             
@@ -2956,6 +2984,9 @@ private final class GiftViewSheetContent: CombinedComponent {
         let hostedDescription = Child(MultilineTextComponent.self)
         let hiddenText = Child(MultilineTextComponent.self)
         let table = Child(TableComponent.self)
+        let fullBackdrop = Child(GiftViewFullBackdropComponent.self)
+        let headerFade = Child(GiftViewHeaderFadeComponent.self)
+        let tablePanel = Child(GiftTonalPanelComponent.self)
         let additionalText = Child(MultilineTextComponent.self)
         
         let upgradeTitle = Child(MultilineTextComponent.self)
@@ -2975,7 +3006,9 @@ private final class GiftViewSheetContent: CombinedComponent {
             let environment = context.environment[ViewControllerComponentContainer.Environment.self].value
             
             let component = context.component
-            let theme = environment.theme
+            // Collectibles: the gift backdrop fills the sheet and texts use the dark look.
+            let fullBackdropGift: StarGift.UniqueGift? = GiftViewFullBackdrop.gift(subject: context.state.subject)
+            let theme: PresentationTheme = fullBackdropGift != nil ? GiftViewFullBackdrop.theme : environment.theme
             let strings = environment.strings
             let dateTimeFormat = environment.dateTimeFormat
             let nameDisplayOrder = component.context.sharedContext.currentPresentationData.with { $0 }.nameDisplayOrder
@@ -2983,6 +3016,7 @@ private final class GiftViewSheetContent: CombinedComponent {
             
             let state = context.state
             let subject = state.subject
+            state.statsEntry = component.externalState.statsEntry
 
             let canCopyGiftMessageText: Bool
             if case let .message(message) = subject {
@@ -3273,6 +3307,15 @@ private final class GiftViewSheetContent: CombinedComponent {
                 headerSubject = nil
             }
             
+            let drawsOwnBackdrop = fullBackdropGift != nil && headerSubject != nil && !showWearPreview && !state.inUpgradePreview
+            if drawsOwnBackdrop, let fullBackdropGift {
+                let backdropComponent: GiftViewFullBackdropComponent = GiftViewFullBackdropComponent(context: component.context, gift: fullBackdropGift, symbolsBottom: headerHeight - 16.0)
+                let backdropSize: CGSize = CGSize(width: context.availableSize.width, height: 1600.0)
+                let backdrop: _UpdatedChildComponent = fullBackdrop.update(component: backdropComponent, availableSize: backdropSize, transition: ComponentTransition.immediate)
+                let backdropPosition: CGPoint = CGPoint(x: context.availableSize.width / 2.0, y: 800.0)
+                context.add(backdrop.position(backdropPosition))
+            }
+            
             var buttonsBackground: GlassControlGroupComponent.Background = .panel
             if let uniqueGift, let backdropAttribute = uniqueGift.attributes.first(where: { attribute in
                 if case .backdrop = attribute {
@@ -3421,6 +3464,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         topBackgroundExtension: giftViewTopOverscrollBackgroundHeight,
                         revealedAttributes: state.revealedAttributes,
                         externalState: giftCompositionExternalState,
+                        drawsBackground: !drawsOwnBackdrop,
                         requestUpdate: { [weak state] transition in
                             state?.updated(transition: transition)
                         }
@@ -3428,10 +3472,24 @@ private final class GiftViewSheetContent: CombinedComponent {
                     availableSize: CGSize(width: context.availableSize.width, height: headerHeight),
                     transition: context.transition
                 )
+                var headerFadeChild: _UpdatedChildComponent?
+                let headerFadeHeight: CGFloat = 170.0
+                if !drawsOwnBackdrop, let fullBackdropGift, let colors = GiftViewFullBackdrop.colors(of: fullBackdropGift) {
+                    headerFadeChild = headerFade.update(
+                        component: GiftViewHeaderFadeComponent(color: colors.outer),
+                        availableSize: CGSize(width: context.availableSize.width, height: headerFadeHeight),
+                        transition: .immediate
+                    )
+                }
                 headerComponents.append({
                     context.add(animation
                         .position(CGPoint(x: context.availableSize.width / 2.0, y: headerHeight / 2.0))
                     )
+                    if let headerFadeChild {
+                        context.add(headerFadeChild
+                            .position(CGPoint(x: context.availableSize.width / 2.0, y: headerHeight - headerFadeHeight / 2.0 + 1.0))
+                        )
+                    }
                 })
             }
             originY += headerHeight
@@ -4664,6 +4722,13 @@ private final class GiftViewSheetContent: CombinedComponent {
                         let buttonSpacing: CGFloat = 10.0
                         let buttonWidth = floor(context.availableSize.width - sideInset * 2.0 - buttonSpacing * CGFloat(buttonsCount - 1)) / CGFloat(buttonsCount)
                         let buttonHeight = headerButtonHeight
+                        // Button color is the backdrop behind it, one step lighter (`GiftControlTone`).
+                        let buttonSurface: (CGFloat) -> GiftStatsTileSurface? = { originX in
+                            return fullBackdropGift.map { gift in
+                                let center = CGPoint(x: originX + buttonWidth / 2.0, y: headerHeight - buttonHeight / 2.0 - headerButtonsBottomInset)
+                                return GiftStatsTileStyle.surface(gift: gift, outerShare: GiftViewFullBackdropComponent.outerShare(at: center, width: context.availableSize.width, headerHeight: headerHeight))
+                            }
+                        }
                         
                         var buttonColor: UIColor = UIColor(rgb: 0xffffff, alpha: 0.1)
                         if case let .color(color) = buttonsBackground {
@@ -4678,6 +4743,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                                     buttonColor: buttonColor,
                                     iconName: "Premium/Collectible/Transfer",
                                     isLocked: isMyHostedUniqueGift,
+                                    surface: buttonSurface(buttonOriginX),
                                     action: { [weak state] in
                                         state?.transferGift()
                                     }
@@ -4702,6 +4768,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                                 title: isWearing ? strings.Gift_View_Header_TakeOff : strings.Gift_View_Header_Wear,
                                 buttonColor: buttonColor,
                                 iconName: isWearing ? "Premium/Collectible/Unwear" : "Premium/Collectible/Wear",
+                                surface: buttonSurface(buttonOriginX),
                                 action: { [weak state] in
                                     if let state {
                                         if isWearing {
@@ -4762,6 +4829,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                                     buttonColor: buttonColor,
                                     iconName: (uniqueGift.resellAmounts ?? []).isEmpty ? "Premium/Collectible/Sell" : "Premium/Collectible/Unlist",
                                     isLocked: isMyHostedUniqueGift,
+                                    surface: buttonSurface(buttonOriginX),
                                     action: { [weak state] in
                                         state?.resellGift()
                                     }
@@ -4783,8 +4851,8 @@ private final class GiftViewSheetContent: CombinedComponent {
                     
                     if isMyHostedUniqueGift, let address = uniqueGift.giftAddress {
                         let textFont = Font.regular(13.0)
-                        let textColor = theme.list.itemSecondaryTextColor
-                        let linkColor = theme.actionSheet.controlAccentColor
+                        let textColor: UIColor = fullBackdropGift != nil ? UIColor(white: 1.0, alpha: 0.85) : theme.list.itemSecondaryTextColor
+                        let linkColor: UIColor = fullBackdropGift != nil ? UIColor.white : theme.actionSheet.controlAccentColor
                         
                         if state.cachedSmallChevronImage == nil || state.cachedSmallChevronImage?.1 !== environment.theme {
                             state.cachedSmallChevronImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/InlineTextRightArrow"), color: linkColor)!, theme)
@@ -4803,7 +4871,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                             attributedString.addAttribute(.attachment, value: chevronImage, range: NSRange(range, in: attributedString.string))
                         }
                         
-                        originY += 1.0
+                        originY += fullBackdropGift != nil ? -9.0 : 1.0
                         let hostedDescription = hostedDescription.update(
                             component: MultilineTextComponent(
                                 text: .plain(attributedString),
@@ -5102,7 +5170,9 @@ private final class GiftViewSheetContent: CombinedComponent {
                         )
                     ), at: hasOriginalInfo ? tableItems.count - 1 : tableItems.count)
                     
-                    if let valueAmount = uniqueGift.valueAmount, let valueCurrency = uniqueGift.valueCurrency, !isDismantled {
+                    if !isDismantled, let statsRow = giftStatsValueRow(state: state, uniqueGift: uniqueGift, theme: theme, strings: strings) {
+                        tableItems.insert(statsRow, at: hasOriginalInfo ? tableItems.count - 1 : tableItems.count)
+                    } else if let valueAmount = uniqueGift.valueAmount, let valueCurrency = uniqueGift.valueCurrency, !isDismantled {
                         tableItems.insert(.init(
                             id: "fiatValue",
                             title: strings.Gift_Unique_Value,
@@ -5285,14 +5355,29 @@ private final class GiftViewSheetContent: CombinedComponent {
                     }
                 }
                 
+                let tonalPalette = fullBackdropGift.map { GiftTonalPalette.cached(gift: $0) }
+                let tableColors = tonalPalette.map { $0.table }
                 let table = table.update(
                     component: TableComponent(
                         theme: theme,
-                        items: tableItems
+                        items: tableItems,
+                        semiTransparent: fullBackdropGift != nil,
+                        tonal: tableColors.map { TableComponent.Tonal(separator: $0.separator, label: $0.label, radius: GiftTonalPalette.cornerRadius, inset: GiftTonalPalette.inset) }
                     ),
                     availableSize: CGSize(width: context.availableSize.width - sideInset * 2.0, height: .greatestFiniteMagnitude),
                     transition: context.transition
                 )
+                if let tonalPalette {
+                    let panel = tablePanel.update(
+                        component: GiftTonalPanelComponent(color: tableColors?.panel ?? tonalPalette.panel),
+                        availableSize: table.size,
+                        transition: context.transition
+                    )
+                    context.add(panel
+                        .position(CGPoint(x: context.availableSize.width / 2.0, y: originY + table.size.height / 2.0))
+                        .cornerRadius(GiftTonalPalette.cornerRadius)
+                    )
+                }
                 context.add(table
                     .clipsToBounds(true)
                     .position(CGPoint(x: context.availableSize.width / 2.0, y: originY + table.size.height / 2.0))
@@ -5322,8 +5407,8 @@ private final class GiftViewSheetContent: CombinedComponent {
             }
             if ((incoming && !converted && !upgraded) || exported || selling || isChatTheme) && (!showUpgradePreview && !showWearPreview && !isDismantled) {
                 let textFont = Font.regular(13.0)
-                let textColor = theme.list.itemSecondaryTextColor
-                let linkColor = theme.actionSheet.controlAccentColor
+                let textColor: UIColor = fullBackdropGift != nil ? UIColor(white: 1.0, alpha: 0.65) : theme.list.itemSecondaryTextColor
+                let linkColor: UIColor = fullBackdropGift != nil ? UIColor.white : theme.actionSheet.controlAccentColor
                 
                 if state.cachedSmallChevronImage == nil || state.cachedSmallChevronImage?.1 !== environment.theme {
                     state.cachedSmallChevronImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/InlineTextRightArrow"), color: linkColor)!, theme)
@@ -5334,6 +5419,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                 
                 var addressToOpen: String?
                 var descriptionText: String
+                var isTonInfo = false
                 if isChatTheme {
                     descriptionText = strings.Gift_View_OpenChatTheme
                 } else if let uniqueGift, selling {
@@ -5347,6 +5433,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                 } else if let uniqueGift, let address = uniqueGift.giftAddress, case .address = uniqueGift.owner, !isMyHostedUniqueGift {
                     addressToOpen = address
                     descriptionText = strings.Gift_View_TonGiftAddressInfo
+                    isTonInfo = true
                 } else {
                     if canUpgrade || savedToProfile {
                         if isChannelGift {
@@ -5362,10 +5449,11 @@ private final class GiftViewSheetContent: CombinedComponent {
                     }
                 }
                 
-                let markdownAttributes = MarkdownAttributes(body: MarkdownAttributeSet(font: textFont, textColor: textColor), bold: MarkdownAttributeSet(font: textFont, textColor: textColor), link: MarkdownAttributeSet(font: textFont, textColor: linkColor), linkAttribute: { contents in
+                let bodyColor: UIColor = isTonInfo && fullBackdropGift != nil ? UIColor(white: 1.0, alpha: 0.85) : textColor
+                let markdownAttributes = MarkdownAttributes(body: MarkdownAttributeSet(font: textFont, textColor: bodyColor), bold: MarkdownAttributeSet(font: textFont, textColor: bodyColor), link: MarkdownAttributeSet(font: textFont, textColor: linkColor), linkAttribute: { contents in
                     return (TelegramTextAttributes.URL, contents)
                 })
-                
+
                 descriptionText = descriptionText.replacingOccurrences(of: " >]", with: "\u{00A0}>]")
                 let attributedString = parseMarkdownIntoAttributedString(descriptionText, attributes: markdownAttributes, textAlignment: .center).mutableCopy() as! NSMutableAttributedString
                 if let range = attributedString.string.range(of: ">"), let chevronImage = state.cachedSmallChevronImage?.0 {
@@ -5421,12 +5509,24 @@ private final class GiftViewSheetContent: CombinedComponent {
                 originY += 16.0
             }
             
-            let buttonBackground = ButtonComponent.Background(
-                style: .glass,
-                color: theme.list.itemCheckColors.fillColor,
-                foreground: theme.list.itemCheckColors.foregroundColor,
-                pressedColor: theme.list.itemCheckColors.fillColor.withMultipliedAlpha(0.9)
-            )
+            let buttonForegroundColor: UIColor = fullBackdropGift != nil ? UIColor.white : theme.list.itemCheckColors.foregroundColor
+            let buttonBackground: ButtonComponent.Background
+            if fullBackdropGift != nil {
+                // The glass is drawn by the container behind the button; the button only carries the title.
+                buttonBackground = ButtonComponent.Background(
+                    style: .glass,
+                    color: .clear,
+                    foreground: .white,
+                    pressedColor: UIColor(white: 1.0, alpha: 0.08)
+                )
+            } else {
+                buttonBackground = ButtonComponent.Background(
+                    style: .glass,
+                    color: theme.list.itemCheckColors.fillColor,
+                    foreground: theme.list.itemCheckColors.foregroundColor,
+                    pressedColor: theme.list.itemCheckColors.fillColor.withMultipliedAlpha(0.9)
+                )
+            }
                         
             let buttonComponent: ButtonComponent
             var buttonTransition = context.transition
@@ -5435,7 +5535,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         background: buttonBackground,
                         content: AnyComponentWithIdentity(
                             id: AnyHashable("custom"),
-                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: customAction.title, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: customAction.title, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                         ),
                         isEnabled: true,
                         displaysProgress: state.inProgress,
@@ -5450,7 +5550,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         background: buttonBackground,
                         content: AnyComponentWithIdentity(
                             id: AnyHashable("skip"),
-                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Upgrade_Skip, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Upgrade_Skip, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                         ),
                         isEnabled: true,
                         displaysProgress: state.inProgress,
@@ -5474,7 +5574,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                             VStack([
                                 AnyComponentWithIdentity(
                                     id: AnyHashable("label"),
-                                    component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                                    component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                                 ),
                                 AnyComponentWithIdentity(
                                     id: AnyHashable("level"),
@@ -5495,11 +5595,11 @@ private final class GiftViewSheetContent: CombinedComponent {
                             HStack([
                                 AnyComponentWithIdentity(
                                     id: AnyHashable("icon"),
-                                    component: AnyComponent(BundleIconComponent(name: "Chat/Stickers/Lock", tintColor: theme.list.itemCheckColors.foregroundColor))
+                                    component: AnyComponent(BundleIconComponent(name: "Chat/Stickers/Lock", tintColor: buttonForegroundColor))
                                 ),
                                 AnyComponentWithIdentity(
                                     id: AnyHashable("label"),
-                                    component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                                    component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                                 )
                             ], spacing: 3.0)
                         )
@@ -5507,7 +5607,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                 } else {
                     buttonContent = AnyComponentWithIdentity(
                         id: AnyHashable("wear"),
-                        component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                        component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Gift_Wear_Start, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                     )
                 }
                 
@@ -5578,7 +5678,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         })
             } else if state.inUpgradePreview {
                 if state.cachedStarImage == nil || state.cachedStarImage?.1 !== theme {
-                    state.cachedStarImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/PremiumIcon"), color: theme.list.itemCheckColors.foregroundColor)!, theme)
+                    state.cachedStarImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/PremiumIcon"), color: buttonForegroundColor)!, theme)
                 }
                 var buttonTitleItems: [AnyComponentWithIdentity<Empty>] = []
                 var upgradeString = strings.Gift_Upgrade_Upgrade
@@ -5603,10 +5703,10 @@ private final class GiftViewSheetContent: CombinedComponent {
                     upgradeString = strings.Gift_Upgrade_UpgradeFor(" # \(priceString)").string
                 }
                 let buttonTitle = subject.arguments?.upgradeStars != nil ? strings.Gift_Upgrade_Confirm : upgradeString
-                let buttonAttributedString = NSMutableAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center)
+                let buttonAttributedString = NSMutableAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center)
                 if let range = buttonAttributedString.string.range(of: "#"), let starImage = state.cachedStarImage?.0 {
                     buttonAttributedString.addAttribute(.attachment, value: starImage, range: NSRange(range, in: buttonAttributedString.string))
-                    buttonAttributedString.addAttribute(.foregroundColor, value: theme.list.itemCheckColors.foregroundColor, range: NSRange(range, in: buttonAttributedString.string))
+                    buttonAttributedString.addAttribute(.foregroundColor, value: buttonForegroundColor, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.baselineOffset, value: 1.5, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.kern, value: 2.0, range: NSRange(range, in: buttonAttributedString.string))
                 }
@@ -5676,7 +5776,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         
                         buttonTitleItems.append(AnyComponentWithIdentity(id: "animated_label", component: AnyComponent(AnimatedTextComponent(
                             font: Font.with(size: 17.0, weight: .semibold, traits: .monospacedNumbers),
-                            color: theme.list.itemCheckColors.foregroundColor,
+                            color: buttonForegroundColor,
                             items: buttonAnimatedTitleItems,
                             noDelay: true,
                             blur: true
@@ -5718,7 +5818,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                     
                     buttonTitleItems.append(AnyComponentWithIdentity(id: "timer", component: AnyComponent(AnimatedTextComponent(
                         font: Font.with(size: 11.0, weight: .medium, traits: .monospacedNumbers),
-                        color: environment.theme.list.itemCheckColors.foregroundColor.withAlphaComponent(0.7),
+                        color: buttonForegroundColor.withAlphaComponent(0.7),
                         items: buttonAnimatedTitleItems,
                         noDelay: true
                     ))))
@@ -5756,7 +5856,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         background: buttonBackground,
                         content: AnyComponentWithIdentity(
                             id: AnyHashable("button"),
-                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                         ),
                         isEnabled: true,
                         displaysProgress: false,
@@ -5779,7 +5879,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                             id: AnyHashable("previewUpgrade"),
                             component: AnyComponent(HStack([
                                 AnyComponentWithIdentity(id: 0, component: AnyComponent(
-                                    MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))
+                                    MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))
                                 ))),
                                 AnyComponentWithIdentity(id: 1, component: AnyComponent(
                                     LottieComponent(
@@ -5805,7 +5905,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         background: buttonBackground,
                         content: AnyComponentWithIdentity(
                             id: AnyHashable("button"),
-                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                         ),
                         isEnabled: true,
                         displaysProgress: state.inProgress,
@@ -5814,10 +5914,10 @@ private final class GiftViewSheetContent: CombinedComponent {
                         })
             } else if !incoming, let resellAmount, !isMyOwnedUniqueGift {
                 if state.cachedStarImage == nil || state.cachedStarImage?.1 !== theme {
-                    state.cachedStarImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/PremiumIcon"), color: theme.list.itemCheckColors.foregroundColor)!, theme)
+                    state.cachedStarImage = (generateTintedImage(image: UIImage(bundleImageName: "Item List/PremiumIcon"), color: buttonForegroundColor)!, theme)
                 }
                 if state.cachedTonImage == nil || state.cachedTonImage?.1 !== theme {
-                    state.cachedTonImage = (generateTintedImage(image: UIImage(bundleImageName: "Ads/TonAbout"), color: theme.list.itemCheckColors.foregroundColor)!, theme)
+                    state.cachedTonImage = (generateTintedImage(image: UIImage(bundleImageName: "Ads/TonAbout"), color: buttonForegroundColor)!, theme)
                 }
                 if state.cachedSubtitleStarImage == nil || state.cachedSubtitleStarImage?.1 !== environment.theme {
                     state.cachedSubtitleStarImage = (generateTintedImage(image: UIImage(bundleImageName: "Chat/Message/StarsCount"), color: .white)!, theme)
@@ -5836,30 +5936,30 @@ private final class GiftViewSheetContent: CombinedComponent {
                     currencyAmount = formatTonAmountText(resellAmount.amount.value, dateTimeFormat: environment.dateTimeFormat, maxDecimalPositions: nil)
                     
                     if let starsAmount = uniqueGift?.resellAmounts?.first(where: { $0.currency == .stars }) {
-                        buttonAttributedSubtitleString = NSMutableAttributedString(string: strings.Gift_View_EqualsTo(" # \(formatStarsAmountText(starsAmount.amount, dateTimeFormat: environment.dateTimeFormat))").string, font: Font.medium(11.0), textColor: theme.list.itemCheckColors.foregroundColor.withAlphaComponent(0.7), paragraphAlignment: .center)
+                        buttonAttributedSubtitleString = NSMutableAttributedString(string: strings.Gift_View_EqualsTo(" # \(formatStarsAmountText(starsAmount.amount, dateTimeFormat: environment.dateTimeFormat))").string, font: Font.medium(11.0), textColor: buttonForegroundColor.withAlphaComponent(0.7), paragraphAlignment: .center)
                     }
                 }
                 buyString += "  \(currencySymbol) \(currencyAmount)"
                 
                 let buttonTitle = subject.arguments?.upgradeStars != nil ? strings.Gift_Upgrade_Confirm : buyString
-                let buttonAttributedString = NSMutableAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center)
+                let buttonAttributedString = NSMutableAttributedString(string: buttonTitle, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center)
                 
                 
                 if let range = buttonAttributedString.string.range(of: "#"), let starImage = state.cachedStarImage?.0 {
                     buttonAttributedString.addAttribute(.attachment, value: starImage, range: NSRange(range, in: buttonAttributedString.string))
-                    buttonAttributedString.addAttribute(.foregroundColor, value: theme.list.itemCheckColors.foregroundColor, range: NSRange(range, in: buttonAttributedString.string))
+                    buttonAttributedString.addAttribute(.foregroundColor, value: buttonForegroundColor, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.baselineOffset, value: 1.5, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.kern, value: 2.0, range: NSRange(range, in: buttonAttributedString.string))
                 }
                 if let range = buttonAttributedString.string.range(of: "$"), let tonImage = state.cachedTonImage?.0 {
                     buttonAttributedString.addAttribute(.attachment, value: tonImage, range: NSRange(range, in: buttonAttributedString.string))
-                    buttonAttributedString.addAttribute(.foregroundColor, value: theme.list.itemCheckColors.foregroundColor, range: NSRange(range, in: buttonAttributedString.string))
+                    buttonAttributedString.addAttribute(.foregroundColor, value: buttonForegroundColor, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.baselineOffset, value: 1.5, range: NSRange(range, in: buttonAttributedString.string))
                     buttonAttributedString.addAttribute(.kern, value: 2.0, range: NSRange(range, in: buttonAttributedString.string))
                 }
                 if let buttonAttributedSubtitleString, let range = buttonAttributedSubtitleString.string.range(of: "#"), let starImage = state.cachedSubtitleStarImage?.0 {
                     buttonAttributedSubtitleString.addAttribute(.attachment, value: starImage, range: NSRange(range, in: buttonAttributedSubtitleString.string))
-                    buttonAttributedSubtitleString.addAttribute(.foregroundColor, value: theme.list.itemCheckColors.foregroundColor.withAlphaComponent(0.7), range: NSRange(range, in: buttonAttributedSubtitleString.string))
+                    buttonAttributedSubtitleString.addAttribute(.foregroundColor, value: buttonForegroundColor.withAlphaComponent(0.7), range: NSRange(range, in: buttonAttributedSubtitleString.string))
                     buttonAttributedSubtitleString.addAttribute(.baselineOffset, value: 1.5, range: NSRange(range, in: buttonAttributedSubtitleString.string))
                     buttonAttributedSubtitleString.addAttribute(.kern, value: 2.0, range: NSRange(range, in: buttonAttributedSubtitleString.string))
                 }
@@ -5888,7 +5988,7 @@ private final class GiftViewSheetContent: CombinedComponent {
                         background: buttonBackground,
                         content: AnyComponentWithIdentity(
                             id: AnyHashable("ok"),
-                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Common_OK, font: Font.semibold(17.0), textColor: theme.list.itemCheckColors.foregroundColor, paragraphAlignment: .center))))
+                            component: AnyComponent(MultilineTextComponent(text: .plain(NSAttributedString(string: strings.Common_OK, font: Font.semibold(17.0), textColor: buttonForegroundColor, paragraphAlignment: .center))))
                         ),
                         isEnabled: true,
                         displaysProgress: state.inProgress,
@@ -5955,75 +6055,89 @@ private final class GiftViewSheetContent: CombinedComponent {
             if state.inWearPreview || state.inUpgradePreview {
                 isBackButton = true
             }
-            var leftControlItems: [GlassControlGroupComponent.Item] = []
-            leftControlItems.append(GlassControlGroupComponent.Item(
-                id: AnyHashable("close"),
-                content: .icon(isBackButton ? "Navigation/Back" : "Navigation/Close"),
-                action: { [weak state] in
-                    guard let state else {
-                        return
-                    }
-                    if state.inWearPreview {
-                        if let controller = controller() as? GiftViewScreen {
-                            controller.dismissAllTooltips()
-                        }
-                        state.inWearPreview = false
-                        state.updated(transition: .spring(duration: 0.4))
-                    } else if state.inUpgradePreview {
-                        state.cancelUpgradePreview()
-                    } else {
-                        state.dismiss(animated: true)
-                    }
+            let closeAction: () -> Void = { [weak state] in
+                guard let state else {
+                    return
                 }
-            ))
-            
-            var rightControlItems: [GlassControlGroupComponent.Item] = []
-            if uniqueGift != nil && !showWearPreview && !isDismantled {
-                if let _ = component.subject.arguments?.canCraftDate {
+                if state.inWearPreview {
+                    if let controller = controller() as? GiftViewScreen {
+                        controller.dismissAllTooltips()
+                    }
+                    state.inWearPreview = false
+                    state.updated(transition: .spring(duration: 0.4))
+                } else if state.inUpgradePreview {
+                    state.cancelUpgradePreview()
+                } else {
+                    state.dismiss(animated: true)
+                }
+            }
+            let craftAction: (() -> Void)? = component.subject.arguments?.canCraftDate != nil ? { [weak state] in
+                state?.craftGift()
+            } : nil
+            let moreAction: () -> Void = { [weak state] in
+                state?.openMore()
+            }
+            let hasRightControls = uniqueGift != nil && !showWearPreview && !isDismantled
+
+            if let fullBackdropGift, !isBackButton {
+                var trailingItems: [GiftCardCornerButtonsComponent.Item] = []
+                if hasRightControls {
+                    if let craftAction {
+                        trailingItems.append(GiftCardCornerButtonsComponent.Item(id: AnyHashable("craft"), content: .icon("Premium/Craft"), label: strings.Gift_Craft_Title, action: craftAction))
+                    }
+                    trailingItems.append(GiftCardCornerButtonsComponent.Item(id: AnyHashable("more"), content: .animation("anim_morewide"), label: strings.Common_More, action: moreAction))
+                }
+                component.externalState.controlPanel = AnyComponent(GiftCardCornerButtonsComponent(
+                    leading: [GiftCardCornerButtonsComponent.Item(id: AnyHashable("close"), content: .icon("Navigation/Close"), label: strings.Common_Close, action: closeAction)],
+                    trailing: trailingItems,
+                    tile: GiftStatsTileStyle.surface(gift: fullBackdropGift, outerShare: GiftViewFullBackdropComponent.cornerOuterShare(width: context.availableSize.width)),
+                    tag: state.controlButtonsTag
+                ))
+            } else {
+                var leftControlItems: [GlassControlGroupComponent.Item] = []
+                leftControlItems.append(GlassControlGroupComponent.Item(
+                    id: AnyHashable("close"),
+                    content: .icon(isBackButton ? "Navigation/Back" : "Navigation/Close"),
+                    action: closeAction
+                ))
+                
+                var rightControlItems: [GlassControlGroupComponent.Item] = []
+                if hasRightControls {
+                    if let craftAction {
+                        rightControlItems.append(GlassControlGroupComponent.Item(
+                            id: AnyHashable("craft"),
+                            content: .icon("Premium/Craft"),
+                            action: craftAction
+                        ))
+                    }
                     rightControlItems.append(GlassControlGroupComponent.Item(
-                        id: AnyHashable("craft"),
-                        content: .icon("Premium/Craft"),
-                        action: { [weak state] in
-                            guard let state else {
-                                return
-                            }
-                            state.craftGift()
-                        }
+                        id: AnyHashable("more"),
+                        content: .animation("anim_morewide"),
+                        action: moreAction
                     ))
                 }
-
-                rightControlItems.append(GlassControlGroupComponent.Item(
-                    id: AnyHashable("more"),
-                    content: .animation("anim_morewide"),
-                    action: { [weak state] in
-                        guard let state else {
-                            return
-                        }
-                        state.openMore()
-                    }
+                
+                var buttonsIsDark = theme.overallDarkAppearance
+                if case .color = buttonsBackground {
+                    buttonsIsDark = true
+                }
+                
+                component.externalState.controlPanel = AnyComponent(GlassControlPanelComponent(
+                    theme: theme,
+                    leftItem: GlassControlPanelComponent.Item(
+                        items: leftControlItems,
+                        background: buttonsBackground
+                    ),
+                    centralItem: nil,
+                    rightItem: rightControlItems.isEmpty ? nil : GlassControlPanelComponent.Item(
+                        items: rightControlItems,
+                        background: buttonsBackground
+                    ),
+                    centerAlignmentIfPossible: true,
+                    isDark: buttonsIsDark,
+                    tag: state.controlButtonsTag
                 ))
             }
-            
-            var buttonsIsDark = theme.overallDarkAppearance
-            if case .color = buttonsBackground {
-                buttonsIsDark = true
-            }
-            
-            component.externalState.controlPanel = GlassControlPanelComponent(
-                theme: theme,
-                leftItem: GlassControlPanelComponent.Item(
-                    items: leftControlItems,
-                    background: buttonsBackground
-                ),
-                centralItem: nil,
-                rightItem: rightControlItems.isEmpty ? nil : GlassControlPanelComponent.Item(
-                    items: rightControlItems,
-                    background: buttonsBackground
-                ),
-                centerAlignmentIfPossible: true,
-                isDark: buttonsIsDark,
-                tag: state.controlButtonsTag
-            )
             component.externalState.controlPanelTransition = context.transition
             component.externalState.topOverscrollBackgroundColor = giftCompositionExternalState.backgroundColor ?? theme.actionSheet.opaqueItemBackgroundColor
             component.externalState.topOverscrollBackgroundTransition = context.transition
@@ -6069,10 +6183,23 @@ private final class GiftViewSheetContentContainer: Component {
         return true
     }
 
-    final class View: UIView {
+    final class View: UIView, UIScrollViewDelegate {
         private final class ScrollView: UIScrollView {
+            /// Stats make the card scroll; at the top a pull down still closes the sheet.
+            var yieldsPullDown = false
+            
             override func touchesShouldCancel(in view: UIView) -> Bool {
                 return true
+            }
+            
+            override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+                if self.yieldsPullDown, gestureRecognizer === self.panGestureRecognizer, self.contentOffset.y <= 0.5 {
+                    let velocity = self.panGestureRecognizer.velocity(in: self)
+                    if velocity.y > 0.0 && abs(velocity.y) > abs(velocity.x) {
+                        return false
+                    }
+                }
+                return super.gestureRecognizerShouldBegin(gestureRecognizer)
             }
         }
 
@@ -6080,11 +6207,17 @@ private final class GiftViewSheetContentContainer: Component {
         private let topOverscrollBackgroundView: UIView
         private let content = ComponentView<EnvironmentType>()
         private let bottomEdgeEffectView: EdgeEffectView
+        private var buttonSurface: GiftFlatTonalView?
         private let controlPanel = ComponentView<Empty>()
         private let button = ComponentView<Empty>()
         private let upgradeNextButton = ComponentView<Empty>()
         private let upgradePriceButton = ComponentView<Empty>()
         private let contentExternalState = GiftViewSheetContent.ExternalState()
+        private var statsMode: GiftViewStatsMode?
+        private weak var componentState: EmptyComponentState?
+        private var getController: (() -> ViewController?)?
+        /// Must be unlocked whatever happens to the card.
+        private weak var lockedPager: GiftPagerComponent.View?
 
         override init(frame: CGRect) {
             self.scrollView = ScrollView()
@@ -6103,6 +6236,7 @@ private final class GiftViewSheetContentContainer: Component {
             self.scrollView.alwaysBounceVertical = false
             self.scrollView.scrollsToTop = false
             self.scrollView.contentInsetAdjustmentBehavior = .never
+            self.scrollView.delegate = self
             self.addSubview(self.scrollView)
 
             self.topOverscrollBackgroundView.isUserInteractionEnabled = false
@@ -6114,6 +6248,80 @@ private final class GiftViewSheetContentContainer: Component {
 
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
+        }
+
+        deinit {
+            self.lockedPager?.isPagingLocked = false
+        }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // The sheet closed mid-transition: stop the morph and restore the card.
+            if self.window == nil, let mode = self.statsMode, mode.isTransitioning {
+                mode.teardown()
+                self.statsMode = nil
+                self.setPagerLocked(false)
+            }
+        }
+
+        fileprivate func enterStats(_ request: GiftViewStatsRequest) {
+            guard self.statsMode == nil, let contentView = self.content.view else {
+                return
+            }
+            let mode = GiftViewStatsMode(
+                request: request,
+                controller: { [weak self] in
+                    return self?.getController?()
+                },
+                requestUpdate: { [weak self] transition in
+                    self?.componentState?.updated(transition: transition)
+                },
+                finished: { [weak self] in
+                    self?.statsMode = nil
+                    self?.setPagerLocked(false)
+                }
+            )
+            self.statsMode = mode
+            self.setPagerLocked(true)
+            var footerViews: [UIView] = []
+            let footerCandidates: [UIView?] = [self.buttonSurface, self.button.view]
+            for view in footerCandidates {
+                if let view, view.superview != nil, !view.isHidden, view.alpha > 0.01 {
+                    footerViews.append(view)
+                }
+            }
+            mode.enter(
+                host: GiftViewStatsHost(
+                    card: self,
+                    scrollView: self.scrollView,
+                    content: contentView,
+                    controlPanel: self.controlPanel.view,
+                    footer: GiftViewStatsFooter(button: footerViews, fade: self.bottomEdgeEffectView)
+                ),
+                valueRow: request.valueRow
+            )
+        }
+
+        private func setPagerLocked(_ locked: Bool) {
+            guard locked else {
+                // The card may have been removed from the pager by now.
+                self.lockedPager?.isPagingLocked = false
+                self.lockedPager = nil
+                return
+            }
+            var view = self.superview
+            while let current = view {
+                if let pager = current as? GiftPagerComponent.View {
+                    pager.isPagingLocked = true
+                    self.lockedPager = pager
+                    return
+                }
+                view = current.superview
+            }
+        }
+
+        func scrollViewDidScroll(_ scrollView: UIScrollView) {
+            self.statsMode?.scrolled(offset: scrollView.contentOffset.y)
         }
 
         private func layoutOptionalButton(
@@ -6156,6 +6364,15 @@ private final class GiftViewSheetContentContainer: Component {
             transition: ComponentTransition
         ) -> CGSize {
             let environmentValue = environment[EnvironmentType.self].value
+            let fullBackdropGift = GiftViewFullBackdrop.gift(subject: component.subject)
+            let fullBackdropColor = fullBackdropGift.flatMap { GiftViewFullBackdrop.colors(of: $0)?.outer }
+            
+            self.componentState = state
+            self.getController = component.getController
+            // Per card: a controller-level slot would belong to whichever pager card was laid out last.
+            self.contentExternalState.statsEntry = { [weak self] request in
+                self?.enterStats(request)
+            }
 
             self.content.parentState = state
             let contentSize = self.content.update(
@@ -6185,7 +6402,7 @@ private final class GiftViewSheetContentContainer: Component {
             )
             self.contentExternalState.topOverscrollBackgroundTransition.setBackgroundColor(
                 view: self.topOverscrollBackgroundView,
-                color: self.contentExternalState.topOverscrollBackgroundColor ?? environmentValue.theme.actionSheet.opaqueItemBackgroundColor
+                color: self.statsMode?.overscrollColor() ?? self.contentExternalState.topOverscrollBackgroundColor ?? self.statsMode?.cardColor(fullBackdropColor) ?? fullBackdropColor ?? environmentValue.theme.actionSheet.opaqueItemBackgroundColor
             )
 
             let buttonInsets = ContainerViewLayout.concentricInsets(bottomInset: environmentValue.safeInsets.bottom, innerDiameter: 52.0, sideInset: 30.0)
@@ -6217,21 +6434,36 @@ private final class GiftViewSheetContentContainer: Component {
             let effectiveBottomInset: CGFloat = environmentValue.metrics.isTablet ? 0.0 : environmentValue.safeInsets.bottom
             let footerHeight = footerContentHeight + 5.0 + effectiveBottomInset
 
-            let intrinsicHeight = contentSize.height + footerHeight
+            var intrinsicHeight = contentSize.height + footerHeight
+            let statsBottomInset = max(16.0, environmentValue.metrics.isTablet ? 16.0 : environmentValue.safeInsets.bottom)
+            if let statsMode = self.statsMode, statsMode.showsStats {
+                intrinsicHeight = statsMode.layoutContent(in: self.scrollView, width: availableSize.width, bottomInset: statsBottomInset, strings: environmentValue.strings, dateTimeFormat: environmentValue.dateTimeFormat, transition: transition)
+            }
             let visibleHeight = min(intrinsicHeight, max(0.0, component.maximumHeight))
             let needsScrolling = intrinsicHeight > visibleHeight + UIScreenPixel
+
+            // Extend the backdrop to the bottom of the stats, plus some room for overscroll.
+            if let contentView = self.content.view, let backdrop = contentView.subviews.first(where: { $0 is GiftViewFullBackdropComponent.View }) as? GiftViewFullBackdropComponent.View {
+                backdrop.setExtent(self.statsMode != nil ? max(intrinsicHeight, visibleHeight) + GiftViewFullBackdropComponent.overscrollReach : nil)
+            }
 
             let scrollFrame = CGRect(origin: .zero, size: CGSize(width: availableSize.width, height: visibleHeight))
             transition.setFrame(view: self.scrollView, frame: scrollFrame)
             let scrollContentSize = CGSize(width: availableSize.width, height: intrinsicHeight)
+            let previousScrollOffset = self.scrollView.contentOffset.y
             let scrollContentSizeChanged = self.scrollView.contentSize != scrollContentSize
             if scrollContentSizeChanged {
                 self.scrollView.contentSize = scrollContentSize
             }
             self.scrollView.isScrollEnabled = needsScrolling
+            self.scrollView.yieldsPullDown = self.statsMode != nil
 
             let maximumContentOffset = max(0.0, intrinsicHeight - visibleHeight)
-            if !needsScrolling {
+            // Back from stats: restore the offset at which the card was captured, animated with the morph.
+            let restoredOffset = self.statsMode?.takeRestoredOffset()
+            if let restoredOffset {
+                transition.setBoundsOrigin(view: self.scrollView, origin: CGPoint(x: 0.0, y: needsScrolling ? max(0.0, min(maximumContentOffset, restoredOffset)) : 0.0))
+            } else if !needsScrolling {
                 if self.scrollView.contentOffset != .zero {
                     self.scrollView.contentOffset = .zero
                 }
@@ -6242,11 +6474,24 @@ private final class GiftViewSheetContentContainer: Component {
                 }
             }
 
+            // The sales list collapsed: scroll by the button shift so it stays under the finger.
+            if let shift = self.statsMode?.embedded.takeSalesLogButtonShift(), shift < 0.0 {
+                let offset = min(max(0.0, previousScrollOffset + shift), maximumContentOffset)
+                self.scrollView.contentOffset = CGPoint(x: 0.0, y: previousScrollOffset)
+                transition.setBoundsOrigin(view: self.scrollView, origin: CGPoint(x: 0.0, y: offset))
+            }
+            // The sales list expanded: scroll so it is fully visible down to "Show Less".
+            if let reveal = self.statsMode?.embedded.takeSalesLogReveal() {
+                let offset = min(max(0.0, previousScrollOffset + reveal), maximumContentOffset)
+                self.scrollView.contentOffset = CGPoint(x: 0.0, y: previousScrollOffset)
+                transition.setBoundsOrigin(view: self.scrollView, origin: CGPoint(x: 0.0, y: offset))
+            }
+
             let footerOriginY = visibleHeight - footerHeight
             let footerFrame = CGRect(origin: CGPoint(x: 0.0, y: footerOriginY), size: CGSize(width: availableSize.width, height: footerHeight))
             transition.setFrame(view: self.bottomEdgeEffectView, frame: footerFrame)
             self.bottomEdgeEffectView.update(
-                content: environmentValue.theme.actionSheet.opaqueItemBackgroundColor,
+                content: self.statsMode?.cardColor(fullBackdropColor) ?? fullBackdropColor ?? environmentValue.theme.actionSheet.opaqueItemBackgroundColor,
                 blur: true,
                 alpha: 1.0,
                 rect: footerFrame,
@@ -6262,6 +6507,21 @@ private final class GiftViewSheetContentContainer: Component {
                 }
                 transition.setFrame(view: buttonView, frame: buttonFrame)
                 transition.setAlpha(view: buttonView, alpha: self.contentExternalState.upgradeNextButton == nil ? 1.0 : 0.0)
+                let hasSurface = fullBackdropGift != nil && self.contentExternalState.upgradeNextButton == nil
+                self.buttonSurface?.isHidden = !hasSurface
+                if hasSurface, let fullBackdropGift {
+                    let surface: GiftFlatTonalView
+                    if let current = self.buttonSurface {
+                        surface = current
+                    } else {
+                        surface = GiftFlatTonalView()
+                        surface.isUserInteractionEnabled = false
+                        self.buttonSurface = surface
+                    }
+                    self.insertSubview(surface, belowSubview: buttonView)
+                    transition.setFrame(view: surface, frame: buttonFrame)
+                    surface.update(tile: GiftStatsTileStyle.surface(gift: fullBackdropGift), shape: .capsule, transition: transition)
+                }
             }
 
             if let upgradeNextButtonComponent = self.contentExternalState.upgradeNextButton {
@@ -6310,7 +6570,7 @@ private final class GiftViewSheetContentContainer: Component {
             if let controlPanelComponent = self.contentExternalState.controlPanel {
                 let controlPanelSize = self.controlPanel.update(
                     transition: self.contentExternalState.controlPanelTransition,
-                    component: AnyComponent(controlPanelComponent),
+                    component: controlPanelComponent,
                     environment: {},
                     containerSize: CGSize(width: availableSize.width - 16.0 * 2.0, height: 44.0)
                 )
@@ -6326,6 +6586,13 @@ private final class GiftViewSheetContentContainer: Component {
                         )
                     )
                 }
+            }
+
+            if let statsMode = self.statsMode {
+                if statsMode.showsStats {
+                    statsMode.layoutChrome(in: self, size: CGSize(width: availableSize.width, height: visibleHeight), bottomInset: statsBottomInset, color: statsMode.cardColor(fullBackdropColor) ?? .clear, strings: environmentValue.strings, dateTimeFormat: environmentValue.dateTimeFormat, transition: transition)
+                }
+                statsMode.reapplyHidden()
             }
 
             return CGSize(width: availableSize.width, height: visibleHeight)
@@ -6447,13 +6714,18 @@ final class GiftViewSheetComponent: CombinedComponent {
                     )),
                     headerContent: headerContent,
                     style: .glass,
-                    backgroundColor: .color(environment.theme.actionSheet.opaqueItemBackgroundColor),
+                    backgroundColor: .color(GiftViewFullBackdrop.gift(subject: context.component.subject).flatMap { GiftViewFullBackdrop.colors(of: $0)?.outer } ?? environment.theme.actionSheet.opaqueItemBackgroundColor),
                     followContentSizeChanges: true,
                     clipsContent: true,
                     hasDimView: false,
                     autoAnimateOut: false,
                     externalState: sheetExternalState,
                     animateOut: animateOut,
+                    didAppear: {
+                        if let controller = controller() as? GiftViewScreen {
+                            controller.openingWave.play(in: controller.view)
+                        }
+                    },
                     onPan: {
                         if let controller = controller() as? GiftViewScreen {
                             controller.dismissAllTooltips()
@@ -6714,8 +6986,9 @@ public class GiftViewScreen: ViewControllerComponentContainer {
     fileprivate var balanceCurrency: CurrencyAmount.Currency
     
     fileprivate let balanceOverlay = ComponentView<Empty>()
+    fileprivate let openingWave = GiftViewOpeningWave()
     
-    fileprivate let profileGiftsContext: ProfileGiftsContext?
+    let profileGiftsContext: ProfileGiftsContext?
     fileprivate let updateSavedToProfile: ((StarGiftReference, Bool) -> Void)?
     fileprivate let convertToStars: ((StarGiftReference) -> Void)?
     fileprivate let dropOriginalDetails: ((StarGiftReference) -> Signal<Never, DropStarGiftOriginalDetailsError>)?
@@ -6891,6 +7164,12 @@ public class GiftViewScreen: ViewControllerComponentContainer {
         }
     }
     
+    public override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        
+        self.openingWave.schedule(in: self.view)
+    }
+    
     public override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         self.dismissAllTooltips()
@@ -6928,7 +7207,7 @@ public class GiftViewScreen: ViewControllerComponentContainer {
         }
     }
         
-    fileprivate func dismissAllTooltips() {
+    func dismissAllTooltips() {
         self.window?.forEachController({ controller in
             if let controller = controller as? TooltipScreen {
                 controller.dismiss(inPlace: false)
@@ -7208,11 +7487,14 @@ private final class GiftViewContextReferenceContentSource: ContextReferenceConte
     }
 }
 
-private final class HeaderButtonComponent: Component {
+// The stats flow finds the header buttons by this type.
+final class HeaderButtonComponent: Component {
     let title: String
     let buttonColor: UIColor
     let iconName: String
     let isLocked: Bool
+    /// Flat tonal surface for collectibles; nil uses the stock glass.
+    let surface: GiftStatsTileSurface?
     let action: () -> Void
     
     public init(
@@ -7220,12 +7502,14 @@ private final class HeaderButtonComponent: Component {
         buttonColor: UIColor,
         iconName: String,
         isLocked: Bool = false,
+        surface: GiftStatsTileSurface? = nil,
         action: @escaping () -> Void
     ) {
         self.title = title
         self.buttonColor = buttonColor
         self.iconName = iconName
         self.isLocked = isLocked
+        self.surface = surface
         self.action = action
     }
     
@@ -7242,6 +7526,9 @@ private final class HeaderButtonComponent: Component {
         if lhs.isLocked != rhs.isLocked {
             return false
         }
+        if lhs.surface != rhs.surface {
+            return false
+        }
         return true
     }
     
@@ -7249,7 +7536,8 @@ private final class HeaderButtonComponent: Component {
         private var component: HeaderButtonComponent?
         private weak var componentState: EmptyComponentState?
         
-        private let backgroundView = GlassBackgroundView()
+        private let glassView = GlassBackgroundView()
+        private let flatView = GiftFlatTonalView()
         private let title = ComponentView<Empty>()
         private let icon = ComponentView<Empty>()
         private let lockIcon = ComponentView<Empty>()
@@ -7258,14 +7546,30 @@ private final class HeaderButtonComponent: Component {
         override init(frame: CGRect) {
             super.init(frame: frame)
             
-            self.addSubview(self.backgroundView)
-            self.backgroundView.contentView.addSubview(self.button)
+            self.addSubview(self.glassView)
+            self.addSubview(self.flatView)
+            self.flatView.isHidden = true
             
+            self.button.highligthedChanged = { [weak self] isHighlighted in
+                guard let self, self.component?.surface != nil else {
+                    return
+                }
+                UIView.animate(withDuration: 0.18, delay: 0.0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
+                    self.flatView.transform = isHighlighted ? CGAffineTransform(scaleX: 0.96, y: 0.96) : .identity
+                })
+            }
             self.button.addTarget(self, action: #selector(self.buttonPressed), for: .touchUpInside)
         }
         
         required init?(coder: NSCoder) {
             fatalError("init(coder:) has not been implemented")
+        }
+        
+        private func content(_ view: UIView, isFlat: Bool) {
+            let parent: UIView = isFlat ? self.flatView : self.glassView.contentView
+            if view.superview !== parent {
+                parent.addSubview(view)
+            }
         }
         
         @objc private func buttonPressed() {
@@ -7280,8 +7584,18 @@ private final class HeaderButtonComponent: Component {
             
             let bounds = CGRect(origin: .zero, size: availableSize)
             
-            self.backgroundView.update(size: bounds.size, cornerRadius: 16.0, isDark: true, tintColor: .init(kind: .custom(style: .default, color: component.buttonColor)), isInteractive: true, transition: transition)
-            transition.setFrame(view: self.backgroundView, frame: bounds)
+            let isFlat = component.surface != nil
+            self.glassView.isHidden = isFlat
+            self.flatView.isHidden = !isFlat
+            if let surface = component.surface {
+                transition.setFrame(view: self.flatView, frame: bounds)
+                self.flatView.update(tile: surface, transition: transition)
+            } else {
+                transition.setFrame(view: self.glassView, frame: bounds)
+                self.glassView.update(size: bounds.size, cornerRadius: 16.0, isDark: true, tintColor: .init(kind: .custom(style: .default, color: component.buttonColor)), isInteractive: true, transition: transition)
+            }
+            self.content(self.button, isFlat: isFlat)
+            let labelColor = isFlat ? GiftStatsTileStyle.labelColor : UIColor.white
             
             let iconSize = self.icon.update(
                 transition: transition,
@@ -7295,10 +7609,8 @@ private final class HeaderButtonComponent: Component {
                 containerSize: availableSize
             )
             if let iconView = self.icon.view {
-                if iconView.superview == nil {
-                    iconView.isUserInteractionEnabled = false
-                    self.backgroundView.contentView.addSubview(iconView)
-                }
+                iconView.isUserInteractionEnabled = false
+                self.content(iconView, isFlat: isFlat)
                 iconView.frame = CGRect(origin: CGPoint(x: floorToScreenPixels((availableSize.width - iconSize.width) / 2.0), y: floorToScreenPixels(22.0 - iconSize.height * 0.5)), size: iconSize)
             }
             
@@ -7309,7 +7621,7 @@ private final class HeaderButtonComponent: Component {
                         text: .plain(NSAttributedString(
                             string: component.title,
                             font: Font.regular(11.0),
-                            textColor: UIColor.white,
+                            textColor: labelColor,
                             paragraphAlignment: .natural
                         )),
                         horizontalAlignment: .center,
@@ -7340,20 +7652,16 @@ private final class HeaderButtonComponent: Component {
                 titleOriginX = availableSize.width / 2.0 - totalTitleWidth / 2.0
                 
                 if let lockIconView = self.lockIcon.view {
-                    if lockIconView.superview == nil {
-                        lockIconView.isUserInteractionEnabled = false
-                        self.backgroundView.contentView.addSubview(lockIconView)
-                    }
+                    lockIconView.isUserInteractionEnabled = false
+                    self.content(lockIconView, isFlat: isFlat)
                     lockIconView.frame = CGRect(origin: CGPoint(x: titleOriginX, y: floorToScreenPixels(42.0 - lockIconSize.height * 0.5)), size: lockIconSize)
                 }
                 titleOriginX += lockIconSize.width + titleSpacing
             }
             
             if let titleView = self.title.view {
-                if titleView.superview == nil {
-                    titleView.isUserInteractionEnabled = false
-                    self.backgroundView.contentView.addSubview(titleView)
-                }
+                titleView.isUserInteractionEnabled = false
+                self.content(titleView, isFlat: isFlat)
                 titleView.frame = CGRect(origin: CGPoint(x: titleOriginX, y: floorToScreenPixels(42.0 - titleSize.height * 0.5)), size: titleSize)
             }
             

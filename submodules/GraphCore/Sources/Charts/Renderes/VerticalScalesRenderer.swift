@@ -26,6 +26,9 @@ class VerticalScalesRenderer: BaseChartRenderer {
     var axisXWidth: CGFloat = GView.oneDevicePixel
     
     var isRightAligned: Bool = false
+    /// Labels go in a gutter right of the plot, centered on their grid lines.
+    var labelsInGutter: Bool = false
+    var giftStyle: Bool = false
     var drawCurrency:((CGContext, UIColor, CGPoint)->Void)?
     
     var horizontalLinesColor: GColor = .black {
@@ -103,27 +106,47 @@ class VerticalScalesRenderer: BaseChartRenderer {
         let labelColorAlpha = labelsColor.alphaValue
         
         let spacing: CGFloat = 1.0
-        context.clip(to: CGRect(origin: CGPoint(x: 0.0, y: chartFrame.minY - spacing), size: CGSize(width: chartFrame.width + chartFrame.origin.x * 2.0, height: chartFrame.height + spacing * 2.0)))
+        context.clip(to: CGRect(origin: CGPoint(x: 0.0, y: chartFrame.minY - spacing - (labelsInGutter ? labelsFont.pointSize : 0.0)), size: CGSize(width: labelsInGutter ? bounds.width : chartFrame.width + chartFrame.origin.x * 2.0, height: chartFrame.height + spacing * 2.0 + (labelsInGutter ? labelsFont.pointSize * 2.0 : 0.0))))
         
         func drawLines(_ labels: [LinesChartLabel], alpha: CGFloat) {
             var lineSegments: [CGPoint] = []
             let x0 = chartFrame.minX
             let x1 = chartFrame.maxX
             
-            context.setStrokeColor(horizontalLinesColor.withAlphaComponent(horizontalLinesColor.alphaValue * alpha).cgColor)
+            if giftStyle {
+                context.setStrokeColor(UIColor(white: 1.0, alpha: 0.12 * alpha).cgColor)
+                context.setLineDash(phase: 0.0, lengths: [3.0, 5.0])
+            } else {
+                context.setStrokeColor(horizontalLinesColor.withAlphaComponent(horizontalLinesColor.alphaValue * alpha).cgColor)
+            }
             
+            var lastDrawnY: CGFloat?
             for lineInfo in labels {
                 let y = transform(toChartCoordinateVertical: lineInfo.value, chartFrame: chartFrame).roundedUpToPixelGrid()
+                if giftStyle, let lastDrawnY, abs(lastDrawnY - y) < 64.0 {
+                    continue
+                }
                 if y < chartFrame.maxY - 2.0 {
                     lineSegments.append(CGPoint(x: x0, y: y))
                     lineSegments.append(CGPoint(x: x1, y: y))
+                    lastDrawnY = y
                 }
             }
             context.strokeLineSegments(between: lineSegments)
+            if giftStyle {
+                context.setLineDash(phase: 0.0, lengths: [])
+            }
         }
         
         func drawVerticalLabels(_ labels: [LinesChartLabel], attributes: [NSAttributedString.Key: Any]) {
-            if isRightAligned {
+            if labelsInGutter {
+                for label in labels {
+                    let y = transform(toChartCoordinateVertical: label.value, chartFrame: chartFrame) - labelsFont.pointSize * 0.6
+                    let attributedString = NSAttributedString(string: label.text, attributes: attributes)
+                    let textNode = LabelNode.layoutText(attributedString, bounds.size)
+                    textNode.1.draw(CGRect(origin: CGPoint(x: chartFrame.maxX + labelsAxisOffset, y: y), size: textNode.0.size), in: context, backingScaleFactor: deviceScale)
+                }
+            } else if isRightAligned {
                 for label in labels {
                     let y = transform(toChartCoordinateVertical: label.value, chartFrame: chartFrame) - labelsFont.pointSize - labelsAxisOffset
                     let attributedString = NSAttributedString(string: label.text, attributes: attributes)
@@ -158,7 +181,11 @@ class VerticalScalesRenderer: BaseChartRenderer {
             
             if drawAxisX {
                 context.setLineWidth(axisXWidth)
-                context.setStrokeColor(axisXColor.withAlphaComponent(axisXColor.alphaValue * horizontalLinesAlpha * generalAlpha).cgColor)
+                if giftStyle {
+                    context.setStrokeColor(UIColor(white: 1.0, alpha: 0.16 * horizontalLinesAlpha * generalAlpha).cgColor)
+                } else {
+                    context.setStrokeColor(axisXColor.withAlphaComponent(axisXColor.alphaValue * horizontalLinesAlpha * generalAlpha).cgColor)
+                }
                 
                 let lineSegments: [CGPoint] = [CGPoint(x: chartFrame.minX, y: chartFrame.maxY.roundedUpToPixelGrid()),
                                                CGPoint(x: chartFrame.maxX, y: chartFrame.maxY.roundedUpToPixelGrid())]

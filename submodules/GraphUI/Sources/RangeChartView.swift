@@ -34,6 +34,8 @@ class RangeChartView: UIControl {
             setNeedsLayout()
         }
     }
+    /// Glass handles, see `GiftChartRangeStyle`.
+    var giftStyle: Bool = false
     public var selectionColor: UIColor = .blue
     public var defaultColor: UIColor = .lightGray
     
@@ -46,6 +48,7 @@ class RangeChartView: UIControl {
     private var selectedMarker: Marker?
     private var selectedMarkerHorizontalOffset: CGFloat = 0
     private var selectedMarkerInitialLocation: CGPoint?
+    private let touchClaim = GiftChartRangeTouchClaim()
     private var isBoundCropHighlighted: Bool = false
     private var isRangePagingEnabled: Bool = false
     
@@ -122,6 +125,13 @@ class RangeChartView: UIControl {
         layoutViews()
     }
     
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil {
+            self.touchClaim.release()
+        }
+    }
+    
     override var isEnabled: Bool {
         get {
             return super.isEnabled
@@ -129,6 +139,7 @@ class RangeChartView: UIControl {
         set {
             if newValue == false {
                 selectedMarker = nil
+                self.touchClaim.release()
             }
             super.isEnabled = newValue
         }
@@ -139,6 +150,30 @@ class RangeChartView: UIControl {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard isEnabled else { return }
         guard let point = touches.first?.location(in: self) else { return }
+        
+        if self.giftStyle {
+            let zones = GiftChartRangeStyle.hitZones(lowerX: locationInView(for: lowerBound), upperX: locationInView(for: upperBound))
+            let marker: Marker?
+            if zones.upper.contains(point.x) {
+                marker = .upper
+            } else if zones.lower.contains(point.x) {
+                marker = .lower
+            } else if zones.center.contains(point.x) {
+                marker = .center
+            } else {
+                marker = nil
+            }
+            guard let marker else {
+                self.beginTapTracking(at: point)
+                return
+            }
+            selectedMarker = marker
+            selectedMarkerHorizontalOffset = point.x - locationInView(for: marker == .upper ? upperBound : lowerBound)
+            selectedMarkerInitialLocation = point
+            isBoundCropHighlighted = true
+            sendActions(for: .touchDown)
+            return
+        }
         
         if abs(locationInView(for: upperBound) - point.x + Constants.markerSelectionRange / 2) < Constants.markerSelectionRange {
             selectedMarker = .upper
@@ -156,20 +191,41 @@ class RangeChartView: UIControl {
             selectedMarkerInitialLocation = point
             isBoundCropHighlighted = true
         } else {
-            targetTapLocation = point
-            selectedMarkerHorizontalOffset = cropFrameView.frame.width / 2.0
-            selectedMarker = nil
-            selectedMarkerInitialLocation = nil
+            self.beginTapTracking(at: point)
             return
         }
         
         sendActions(for: .touchDown)
     }
     
+    private func beginTapTracking(at point: CGPoint) {
+        targetTapLocation = point
+        selectedMarkerHorizontalOffset = cropFrameView.frame.width / 2.0
+        selectedMarker = nil
+        selectedMarkerInitialLocation = nil
+    }
+    
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard isEnabled else { return }
         guard let selectedMarker = selectedMarker else { return }
         guard let point = touches.first?.location(in: self) else { return }
+        
+        if self.giftStyle, !self.touchClaim.isHolding, let initialPosition = selectedMarkerInitialLocation {
+            switch GiftChartRangeTouchClaim.direction(dx: point.x - initialPosition.x, dy: point.y - initialPosition.y) {
+            case .horizontal:
+                self.touchClaim.hold(above: self)
+            case .vertical:
+                // Vertical drag belongs to the card scroll.
+                self.selectedMarker = nil
+                self.selectedMarkerInitialLocation = nil
+                self.isBoundCropHighlighted = false
+                self._isTracking = false
+                sendActions(for: .touchCancel)
+                return
+            case .undecided:
+                break
+            }
+        }
         
         let horizontalPosition = point.x - selectedMarkerHorizontalOffset
         let fraction = fractionFor(offsetX: horizontalPosition)
@@ -185,6 +241,7 @@ class RangeChartView: UIControl {
     }
     
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        self.touchClaim.release()
         guard isEnabled else { return }
         if let point = targetTapLocation {
             let horizontalPosition = point.x - selectedMarkerHorizontalOffset
@@ -220,6 +277,7 @@ class RangeChartView: UIControl {
     }
     
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        self.touchClaim.release()
         self.targetTapLocation = nil
         self.selectedMarker = nil
         self.selectedMarkerInitialLocation = nil
@@ -267,21 +325,41 @@ private extension RangeChartView {
             fractionToCount = fraction
         }
 
-        switch marker {
-        case .lower:
-            lowerBound = min(fractionToCount, upperBound - minimumRangeDistance)
-        case .upper:
-            upperBound = max(fractionToCount, lowerBound + minimumRangeDistance)
-        case .center:
-            let distance = upperBound - lowerBound
-            lowerBound = max(0, min(fractionToCount, 1 - distance))
-            upperBound = lowerBound + distance
+        if self.giftStyle && marker != .center {
+            self.moveBoundWithMinimumWidth(marker, fraction: fractionToCount)
+        } else {
+            switch marker {
+            case .lower:
+                lowerBound = min(fractionToCount, upperBound - minimumRangeDistance)
+            case .upper:
+                upperBound = max(fractionToCount, lowerBound + minimumRangeDistance)
+            case .center:
+                let distance = upperBound - lowerBound
+                lowerBound = max(0, min(fractionToCount, 1 - distance))
+                upperBound = lowerBound + distance
+            }
         }
         if notifyDelegate {
             rangeDidChangeClosure?(lowerBound...upperBound)
         }
         UIView.animate(withDuration: isRangePagingEnabled ? 0.1 : 0) {
             self.layoutIfNeeded()
+        }
+    }
+    
+    /// Keeps the window at least `GiftChartRangeStyle.minimumWindowWidth` points wide.
+    private func moveBoundWithMinimumWidth(_ marker: Marker, fraction: CGFloat) {
+        let minimum = max(minimumRangeDistance, contentFrame.width > 0 ? GiftChartRangeStyle.minimumWindowWidth / contentFrame.width : 0)
+        if marker == .lower {
+            lowerBound = max(0, min(fraction, upperBound - minimum))
+            if upperBound - lowerBound < minimum {
+                upperBound = min(1, lowerBound + minimum)
+            }
+        } else {
+            upperBound = min(1, max(fraction, lowerBound + minimum))
+            if upperBound - lowerBound < minimum {
+                lowerBound = max(0, upperBound - minimum)
+            }
         }
     }
     
@@ -316,7 +394,7 @@ extension RangeChartView: ChartThemeContainer {
             self.upperBoundTintView.backgroundColor = theme.rangeViewTintColor
         }
         
-        self.cropFrameView.setImage(theme.rangeCropImage, animated: animated)
+        self.cropFrameView.setImage(self.giftStyle ? (GiftChartRangeStyle.cropImage() ?? theme.rangeCropImage) : theme.rangeCropImage, animated: animated)
         
         if animated {
             UIView.animate(withDuration: .defaultDuration, animations: closure)

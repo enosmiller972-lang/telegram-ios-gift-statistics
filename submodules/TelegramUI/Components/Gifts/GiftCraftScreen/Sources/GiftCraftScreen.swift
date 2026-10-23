@@ -5,8 +5,6 @@ import Display
 import ComponentFlow
 import SwiftSignalKit
 import TelegramCore
-import AppBundle
-import LocalMediaResources
 import TelegramPresentationData
 import TelegramStringFormatting
 import ViewControllerComponent
@@ -26,7 +24,7 @@ import Markdown
 import InfoParagraphComponent
 import PresentationDataUtils
 import GiftViewScreen
-import PeerInfoCoverComponent
+import GiftCraftBackdrop
 import LottieComponent
 import TooltipUI
 import TextFormat
@@ -135,9 +133,7 @@ private final class CraftGiftPageContent: Component {
     
     final class View: UIView, UIScrollViewDelegate {
         private let tableContainer = UIView()
-        private let background = SimpleGradientLayer()
-        private let overlay = SimpleGradientLayer()
-        private let pattern = ComponentView<Empty>()
+        private let backdrop = GiftCraftBackdropView()
     
         private let title = ComponentView<Empty>()
         private let descriptionText = ComponentView<Empty>()
@@ -185,17 +181,7 @@ private final class CraftGiftPageContent: Component {
         override init(frame: CGRect) {
             super.init(frame: frame)
                                     
-            self.background.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
-            self.background.cornerRadius = 40.0
-            self.background.type = .axial
-            self.background.startPoint = CGPoint(x: 0.5, y: 0.0)
-            self.background.endPoint = CGPoint(x: 0.5, y: 1.0)
-            self.layer.addSublayer(self.background)
-            
-            self.overlay.type = .radial
-            self.overlay.startPoint = CGPoint(x: 0.5, y: 0.5)
-            self.overlay.endPoint = CGPoint(x: 0.0, y: 1.0)
-            self.layer.addSublayer(self.overlay)
+            self.addSubview(self.backdrop)
         }
         
         required init?(coder: NSCoder) {
@@ -342,9 +328,6 @@ private final class CraftGiftPageContent: Component {
                 }))
             }
             
-            transition.setGradientColors(layer: self.background, colors: [component.colors.0, component.colors.1])
-            transition.setGradientColors(layer: self.overlay, colors: [component.colors.2, component.colors.2.withAlphaComponent(0.0)])
-            
             let environment = environment[ViewControllerComponentContainer.Environment.self].value
             
             let sideInset: CGFloat = 16.0 + environment.safeInsets.left
@@ -365,53 +348,6 @@ private final class CraftGiftPageContent: Component {
             var craftContentHeight: CGFloat = 0.0
             var infoContentHeight: CGFloat = 0.0
                         
-            let anvilPath = getAppBundle().url(forResource: "Anvil", withExtension: "tgs")?.path ?? ""
-            let anvilFile = TelegramMediaFile(
-                fileId: EngineMedia.Id(namespace: Namespaces.Media.CloudFile, id: -123456789),
-                partialReference: nil,
-                resource: BundleResource(name: "Anvil", path: anvilPath),
-                previewRepresentations: [],
-                videoThumbnails: [],
-                immediateThumbnailData: nil,
-                mimeType: "application/x-tgsticker",
-                size: nil,
-                attributes: [
-                    .FileName(fileName: "sticker.tgs"),
-                    .CustomEmoji(isPremium: false, isSingleColor: true, alt: "", packReference: .animatedEmojiAnimations)
-                ],
-                alternativeRepresentations: []
-            )
-            
-            var backgroundTransition = transition
-            let backgroundSize = self.pattern.update(
-                transition: backgroundTransition,
-                component: AnyComponent(PeerInfoCoverComponent(
-                    context: component.context,
-                    subject: .custom(.clear, .clear, UIColor(rgb: 0x000000), anvilFile.fileId.id),
-                    files: [anvilFile.fileId.id: anvilFile],
-                    isDark: false,
-                    avatarCenter: CGPoint(x: availableSize.width / 2.0, y: 169.0),
-                    avatarSize: CGSize(width: 130.0, height: 130.0),
-                    avatarScale: 1.0,
-                    defaultHeight: 300.0,
-                    gradientOnTop: true,
-                    avatarTransitionFraction: 0.0,
-                    patternTransitionFraction: 0.0,
-                    patternIconScale: 1.5
-                )),
-                environment: {},
-                containerSize: CGSize(width: availableSize.width, height: 169.0 * 2.0)
-            )
-            let backgroundFrame = CGRect(origin: CGPoint(x: 0.0, y: isCrafting && !"".isEmpty ? floor((component.screenSize.height - backgroundSize.height) / 2.0) : 0.0), size: backgroundSize)
-            if let backgroundView = self.pattern.view {
-                if backgroundView.layer.superlayer == nil {
-                    backgroundTransition = .immediate
-                    backgroundView.clipsToBounds = true
-                    backgroundView.isUserInteractionEnabled = false
-                    self.layer.insertSublayer(backgroundView.layer, above: self.overlay)
-                }
-                backgroundTransition.setFrame(view: backgroundView, frame: backgroundFrame)
-            }
                                     
             let titleSize = self.title.update(
                 transition: transition,
@@ -1418,8 +1354,8 @@ private final class CraftGiftPageContent: Component {
             }
             transition.setFrame(view: self.infoContainer, frame: CGRect(origin: .zero, size: CGSize(width: availableSize.width, height: infoContentHeight)))
                         
-            transition.setFrame(layer: self.background, frame: CGRect(origin: .zero, size: CGSize(width: availableSize.width, height: craftContentHeight)))
-            transition.setFrame(layer: self.overlay, frame: CGRect(origin: CGPoint(x: 0.0, y: isCrafting && !"".isEmpty ? floor((component.screenSize.height - availableSize.width) / 2.0) : 169.0 - availableSize.width * 0.5), size: CGSize(width: availableSize.width, height: availableSize.width)))
+            transition.setFrame(view: self.backdrop, frame: CGRect(origin: .zero, size: CGSize(width: availableSize.width, height: craftContentHeight)))
+            self.backdrop.update(context: component.context, colors: GiftCraftBackdropColors(top: component.colors.0, bottom: component.colors.1, glow: component.colors.2, tint: component.colors.3), size: CGSize(width: availableSize.width, height: craftContentHeight), transition: transition)
             
             let effectiveContentHeight: CGFloat
             if component.displayInfo {
@@ -1598,10 +1534,10 @@ private final class SheetContainerComponent: CombinedComponent {
             let theme = environment.theme
                         
             var colors: (UIColor, UIColor, UIColor, UIColor, UIColor) = (
-                UIColor(rgb: 0x263245),
-                UIColor(rgb: 0x232e3f),
-                UIColor(rgb: 0x304059),
-                UIColor(rgb: 0x425168),
+                GiftCraftBackdropColors.standard.top,
+                GiftCraftBackdropColors.standard.bottom,
+                GiftCraftBackdropColors.standard.glow,
+                GiftCraftBackdropColors.standard.tint,
                 theme.list.itemCheckColors.fillColor
             )
             var permilleValue: Int32 = 0
@@ -1611,19 +1547,19 @@ private final class SheetContainerComponent: CombinedComponent {
                 }
             }
             if permilleValue >= 950 {
-                colors.0 = UIColor(rgb: 0x1b3b3d)
-                colors.1 = UIColor(rgb: 0x1a2f38)
-                colors.2 = UIColor(rgb: 0x22464a)
-                colors.3 = UIColor(rgb: 0x2d4e50)
+                colors.0 = GiftCraftBackdropColors.success.top
+                colors.1 = GiftCraftBackdropColors.success.bottom
+                colors.2 = GiftCraftBackdropColors.success.glow
+                colors.3 = GiftCraftBackdropColors.success.tint
                 if !state.displayInfo {
                     colors.4 = UIColor(rgb: 0x33bf54)
                 }
             }
             if state.displayFailure {
-                colors.0 = UIColor(rgb: 0x46231a)
-                colors.1 = UIColor(rgb: 0x381b1a)
-                colors.2 = UIColor(rgb: 0x51291f)
-                colors.3 = UIColor(rgb: 0x683e34)
+                colors.0 = GiftCraftBackdropColors.failure.top
+                colors.1 = GiftCraftBackdropColors.failure.bottom
+                colors.2 = GiftCraftBackdropColors.failure.glow
+                colors.3 = GiftCraftBackdropColors.failure.tint
                 if !state.displayInfo {
                     colors.4 = UIColor(rgb: 0x683e34)
                 }

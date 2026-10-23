@@ -15033,6 +15033,37 @@ Sorry for the inconvenience.";
 "Gift.Value.ForSaleOnTelegram" = "for sale on Telegram";
 "Gift.Value.ForSaleOnFragment" = "for sale on Fragment";
 
+"Gift.Stats.PriceTitle" = "Price";
+"Gift.Stats.SalesTitle" = "Sales";
+"Gift.Stats.Floor" = "Floor";
+"Gift.Stats.SalesSeries" = "Sales";
+"Gift.Stats.TileSupply" = "Supply";
+"Gift.Stats.TileListed" = "Listed";
+"Gift.Stats.ViewMore" = "View More";
+"Gift.Stats.Buy" = "Buy";
+"Gift.Stats.BuyFrom" = "Buy from %@";
+"Gift.Stats.RecentSales" = "Recent Sales";
+"Gift.Stats.ShowAll" = "Show All";
+"Gift.Stats.ShowLess" = "Show Less";
+"Gift.Stats.AgoMinutes" = "%@m ago";
+"Gift.Stats.AgoHours" = "%@h ago";
+"Gift.Stats.AgoDays" = "%@d ago";
+"Gift.Stats.AgoWeeks" = "%@w ago";
+"Gift.Stats.AgoMonths" = "%@mo ago";
+"Gift.Stats.AgoYears" = "%@y ago";
+"Gift.Stats.AgoSpoken" = "%@ ago";
+"Gift.Stats.Join" = "%1$@, %2$@";
+"Gift.Stats.Separator" = "%1$@  ·  %2$@";
+"Gift.Stats.DateRange" = "%1$@ – %2$@";
+"Gift.Stats.FromTo" = "From %1$@ to %2$@";
+"Gift.Stats.AgoNow" = "just now";
+"Gift.Stats.CollectionInfo" = "Each %@ is a unique item.\nBuy and sell them on the market.";
+"Gift.Stats.YourItem" = "Your Item";
+"Gift.Stats.AveragePrice" = "Average price";
+"Gift.Stats.Sell" = "Sell";
+"Gift.Stats.Unlist" = "Unlist";
+"Gift.Stats.Sold" = "Sold";
+
 "Gift.View.Context.SetAsTheme" = "Set as Theme in...";
 
 "Notification.GiftStars" = "Gift for %@";

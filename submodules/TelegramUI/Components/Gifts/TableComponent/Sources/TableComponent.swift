@@ -18,6 +18,11 @@ public final class TableComponent: CombinedComponent {
         public let hasBackground: Bool
         public let component: AnyComponent<Empty>
         public let insets: UIEdgeInsets?
+        /// Makes the whole row a button. `actionTag` names its view for `findTaggedView`.
+        public let action: (() -> Void)?
+        public let actionTag: AnyObject?
+        /// Read for the whole row as a single element.
+        public let accessibilityLabel: String?
 
         public init<IdType: Hashable>(
             id: IdType,
@@ -25,7 +30,10 @@ public final class TableComponent: CombinedComponent {
             titleFont: TitleFont = .regular,
             hasBackground: Bool = false,
             component: AnyComponent<Empty>,
-            insets: UIEdgeInsets? = nil
+            insets: UIEdgeInsets? = nil,
+            action: (() -> Void)? = nil,
+            actionTag: AnyObject? = nil,
+            accessibilityLabel: String? = nil
         ) {
             self.id = AnyHashable(id)
             self.title = title
@@ -33,6 +41,9 @@ public final class TableComponent: CombinedComponent {
             self.hasBackground = hasBackground
             self.component = component
             self.insets = insets
+            self.action = action
+            self.actionTag = actionTag
+            self.accessibilityLabel = accessibilityLabel
         }
 
         public static func == (lhs: Item, rhs: Item) -> Bool {
@@ -54,24 +65,45 @@ public final class TableComponent: CombinedComponent {
             if lhs.insets != rhs.insets {
                 return false
             }
+            if (lhs.action == nil) != (rhs.action == nil) || lhs.actionTag !== rhs.actionTag || lhs.accessibilityLabel != rhs.accessibilityLabel {
+                return false
+            }
             return true
+        }
+    }
+    
+    /// The caller draws the panel; the table draws only row separators, no outline or column divider.
+    public struct Tonal: Equatable {
+        public var separator: UIColor
+        public var label: UIColor
+        public var radius: CGFloat
+        public var inset: CGFloat
+
+        public init(separator: UIColor, label: UIColor, radius: CGFloat, inset: CGFloat) {
+            self.separator = separator
+            self.label = label
+            self.radius = radius
+            self.inset = inset
         }
     }
     
     private let theme: PresentationTheme
     private let items: [Item]
     private let semiTransparent: Bool
+    private let tonal: Tonal?
     private let rightColumnBackgroundColor: UIColor?
     
     public init(
         theme: PresentationTheme,
         items: [Item],
         semiTransparent: Bool = false,
+        tonal: Tonal? = nil,
         rightColumnBackgroundColor: UIColor? = nil
     ) {
         self.theme = theme
         self.items = items
         self.semiTransparent = semiTransparent
+        self.tonal = tonal
         self.rightColumnBackgroundColor = rightColumnBackgroundColor
     }
 
@@ -82,7 +114,7 @@ public final class TableComponent: CombinedComponent {
         if lhs.items != rhs.items {
             return false
         }
-        if lhs.semiTransparent != rhs.semiTransparent {
+        if lhs.semiTransparent != rhs.semiTransparent || lhs.tonal != rhs.tonal {
             return false
         }
         if lhs.rightColumnBackgroundColor != rhs.rightColumnBackgroundColor {
@@ -111,15 +143,20 @@ public final class TableComponent: CombinedComponent {
         let valueChildren = ChildMap(environment: Empty.self, keyedBy: AnyHashable.self)
         let borderChildren = ChildMap(environment: Empty.self, keyedBy: AnyHashable.self)
         let outerBorder = Child(Image.self)
+        let rowButtons = ChildMap(environment: Empty.self, keyedBy: AnyHashable.self)
 
         return { context in
             let verticalPadding: CGFloat = 11.0
-            let horizontalPadding: CGFloat = 12.0
-            let borderWidth: CGFloat = 1.0
+            let tonal = context.component.tonal
+            let horizontalPadding: CGFloat = tonal?.inset ?? 12.0
+            let borderWidth: CGFloat = tonal != nil ? UIScreenPixel : 1.0
             
             let borderColor: UIColor
             let secondaryBackgroundColor: UIColor
-            if context.component.semiTransparent {
+            if let tonal {
+                borderColor = tonal.separator
+                secondaryBackgroundColor = .clear
+            } else if context.component.semiTransparent {
                 borderColor = context.component.theme.actionSheet.primaryTextColor.withMultipliedAlpha(0.1)
                 secondaryBackgroundColor = context.component.theme.actionSheet.primaryTextColor.withMultipliedAlpha(0.05)
             } else {
@@ -127,6 +164,7 @@ public final class TableComponent: CombinedComponent {
                 borderColor = backgroundColor.mixedWith(context.component.theme.list.itemBlocksSeparatorColor, alpha: 0.6)
                 secondaryBackgroundColor = context.component.theme.overallDarkAppearance ? context.component.theme.list.itemModalBlocksBackgroundColor : context.component.theme.list.itemInputField.backgroundColor
             }
+            let outlineColor: UIColor = tonal != nil ? .clear : borderColor
             
             var leftColumnWidth: CGFloat = 0.0
             
@@ -142,7 +180,7 @@ public final class TableComponent: CombinedComponent {
                 }
                 let titleChild = titleChildren[item.id].update(
                     component: AnyComponent(MultilineTextComponent(
-                        text: .plain(NSAttributedString(string: title, font: item.titleFont == .bold ? Font.semibold(15.0) : Font.regular(15.0), textColor: context.component.theme.list.itemPrimaryTextColor))
+                        text: .plain(NSAttributedString(string: title, font: item.titleFont == .bold ? Font.semibold(15.0) : Font.regular(15.0), textColor: tonal?.label ?? context.component.theme.list.itemPrimaryTextColor))
                     )),
                     availableSize: context.availableSize,
                     transition: context.transition
@@ -170,7 +208,9 @@ public final class TableComponent: CombinedComponent {
             for item in context.component.items {
                 let insets: UIEdgeInsets
                 if let customInsets = item.insets {
-                    insets = customInsets
+                    // Custom insets assume 12pt padding.
+                    let shift = horizontalPadding - 12.0
+                    insets = UIEdgeInsets(top: customInsets.top, left: customInsets.left + shift, bottom: customInsets.bottom, right: customInsets.right + shift)
                 } else {
                     insets = UIEdgeInsets(top: 0.0, left: horizontalPadding, bottom: 0.0, right: horizontalPadding)
                 }
@@ -206,7 +246,7 @@ public final class TableComponent: CombinedComponent {
                 if i < context.component.items.count - 1 {
                     let borderChild = borderChildren[item.id].update(
                         component: AnyComponent(Rectangle(color: borderColor)),
-                        availableSize: CGSize(width: context.availableSize.width, height: borderWidth),
+                        availableSize: CGSize(width: context.availableSize.width - (tonal != nil ? horizontalPadding * 2.0 : 0.0), height: borderWidth),
                         transition: context.transition
                     )
                     updatedBorderChildren.append(borderChild)
@@ -228,7 +268,7 @@ public final class TableComponent: CombinedComponent {
                 i += 1
             }
             
-            let borderRadius: CGFloat = 14.0
+            let borderRadius: CGFloat = tonal?.radius ?? 14.0
 
             if let rightColumnBackgroundColor = context.component.rightColumnBackgroundColor {
                 let rightColumnImage: UIImage
@@ -350,7 +390,7 @@ public final class TableComponent: CombinedComponent {
                     context.fillPath()
                     
                     context.setBlendMode(.normal)
-                    context.setStrokeColor(borderColor.cgColor)
+                    context.setStrokeColor(outlineColor.cgColor)
                     context.setLineWidth(borderWidth)
                     context.addPath(path)
                     context.strokePath()
@@ -368,7 +408,7 @@ public final class TableComponent: CombinedComponent {
             )
             
             let verticalBorder = verticalBorder.update(
-                component: Rectangle(color: borderColor),
+                component: Rectangle(color: outlineColor),
                 availableSize: CGSize(width: borderWidth, height: innerTotalHeight),
                 transition: context.transition
             )
@@ -395,6 +435,32 @@ public final class TableComponent: CombinedComponent {
                     } else {
                         valueFrame = CGRect(origin: CGPoint(x: horizontalPadding, y: originY + verticalPadding), size: valueChild.size)
                     }
+                }
+                
+                let item = context.component.items[i]
+                if let action = item.action {
+                    var corners: CACornerMask = []
+                    if i == 0 {
+                        corners.formUnion([.layerMinXMinYCorner, .layerMaxXMinYCorner])
+                    }
+                    if i == context.component.items.count - 1 {
+                        corners.formUnion([.layerMinXMaxYCorner, .layerMaxXMaxYCorner])
+                    }
+                    let rowButton = rowButtons[item.id].update(
+                        component: AnyComponent(TableRowButtonComponent(
+                            highlightColor: context.component.theme.actionSheet.primaryTextColor.withMultipliedAlpha(0.1),
+                            maskedCorners: corners,
+                            cornerRadius: corners.isEmpty ? 0.0 : borderRadius,
+                            tag: item.actionTag,
+                            accessibilityLabel: item.accessibilityLabel,
+                            action: action
+                        )),
+                        availableSize: CGSize(width: context.availableSize.width, height: rowHeight),
+                        transition: context.transition
+                    )
+                    context.add(rowButton
+                        .position(CGPoint(x: context.availableSize.width / 2.0, y: originY + rowHeight / 2.0))
+                    )
                 }
                 
                 context.add(valueChild

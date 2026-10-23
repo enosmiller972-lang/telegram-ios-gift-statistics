@@ -24,7 +24,7 @@ public enum ChartType {
 }
 
 public extension ChartTheme {    
-    convenience init(presentationTheme: PresentationTheme) {
+    convenience init(presentationTheme: PresentationTheme, backgroundColor: UIColor? = nil, rangeViewTintColor: UIColor? = nil, labelsColor: UIColor? = nil) {
         let rangeViewFrameColor = presentationTheme.chart.rangeViewFrameColor
         let rangeViewMarkerColor = presentationTheme.chart.rangeViewMarkerColor
         
@@ -65,11 +65,11 @@ public extension ChartTheme {
             context.strokePath()
         })?.resizableImage(withCapInsets: UIEdgeInsets(top: 15.0, left: 11.0, bottom: 15.0, right: 11.0), resizingMode: .stretch)
         
-        self.init(chartTitleColor: presentationTheme.list.itemPrimaryTextColor, actionButtonColor: presentationTheme.list.itemAccentColor, chartBackgroundColor: presentationTheme.list.itemBlocksBackgroundColor, chartLabelsColor: presentationTheme.chart.labelsColor, chartHelperLinesColor: presentationTheme.chart.helperLinesColor, chartStrongLinesColor: presentationTheme.chart.strongLinesColor, barChartStrongLinesColor: presentationTheme.chart.barStrongLinesColor, chartDetailsTextColor: presentationTheme.chart.detailsTextColor, chartDetailsArrowColor: presentationTheme.chart.detailsArrowColor, chartDetailsViewColor: presentationTheme.chart.detailsViewColor, rangeViewFrameColor: rangeViewFrameColor, rangeViewTintColor: presentationTheme.list.blocksBackgroundColor.withAlphaComponent(0.5), rangeViewMarkerColor: rangeViewMarkerColor, rangeCropImage: rangeImage)
+        self.init(chartTitleColor: presentationTheme.list.itemPrimaryTextColor, actionButtonColor: presentationTheme.list.itemAccentColor, chartBackgroundColor: backgroundColor ?? presentationTheme.list.itemBlocksBackgroundColor, chartLabelsColor: labelsColor ?? presentationTheme.chart.labelsColor, chartHelperLinesColor: presentationTheme.chart.helperLinesColor, chartStrongLinesColor: presentationTheme.chart.strongLinesColor, barChartStrongLinesColor: presentationTheme.chart.barStrongLinesColor, chartDetailsTextColor: presentationTheme.chart.detailsTextColor, chartDetailsArrowColor: presentationTheme.chart.detailsArrowColor, chartDetailsViewColor: presentationTheme.chart.detailsViewColor, rangeViewFrameColor: rangeViewFrameColor, rangeViewTintColor: rangeViewTintColor ?? presentationTheme.list.blocksBackgroundColor.withAlphaComponent(0.5), rangeViewMarkerColor: rangeViewMarkerColor, rangeCropImage: rangeImage)
     }
 }
 
-public func createChartController(_ data: String, type: ChartType, rate: Double = 1.0, getDetailsData: @escaping (Date, @escaping (String?) -> Void) -> Void) -> BaseChartController? {
+public func createChartController(_ data: String, type: ChartType, rate: Double = 1.0, valueFormat: ChartValueFormat? = nil, getDetailsData: @escaping (Date, @escaping (String?) -> Void) -> Void) -> BaseChartController? {
     var resultController: BaseChartController?
     if let data = data.data(using: .utf8) {
         ChartsDataManager.readChart(data: data, extraCopiesCount: 0, sync: true, success: { collection in
@@ -149,6 +149,7 @@ public func createChartController(_ data: String, type: ChartType, rate: Double 
                     controller = linesController
                     controller.isZoomable = false
             }
+            controller.valueFormat = valueFormat
             controller.getDetailsData = { date, completion in
                 getDetailsData(date, { detailsData in
                     if let detailsData = detailsData, let data = detailsData.data(using: .utf8) {
@@ -193,7 +194,64 @@ public final class ChartNode: ASDisplayNode {
         self.chartView.apply(theme: theme, strings: strings, animated: false)
     }
     
+    /// See `BaseChartController.selectionHandler`.
+    public var selectionHandler: ((BaseChartController.ChartSelectionInfo?) -> Void)? {
+        didSet {
+            self.chartView.controller?.selectionHandler = self.selectionHandler
+        }
+    }
+    
+    /// Plot frame in this node's coordinates and the data ranges currently shown.
+    public var plotGeometry: BaseChartController.ChartPlotGeometry? {
+        return self.chartView.controller?.plotGeometry
+    }
+    
+    /// Reserves `width` right of the plot for the value labels so they never overlap the data.
+    public func setValueGutter(_ width: CGFloat) {
+        self.chartView.chartView.chartInsets.right = 16.0 + width
+        self.chartView.controller?.setValueLabelsInGutter(width > 0.0)
+        self.chartView.chartView.setNeedsDisplay()
+    }
+    
+    /// Gift statistics look. Set before `setup(controller:)`.
+    public var giftStyle: Bool = false {
+        didSet {
+            self.chartView.giftStyle = self.giftStyle
+        }
+    }
+    
+    /// Alpha of the date range title above the plot.
+    public func setLabelsAlpha(_ alpha: CGFloat) {
+        self.chartView.titleLabel.alpha = alpha
+    }
+
+    public func pulseLastPoint() {
+        self.chartView.controller?.pulseLastPoint()
+    }
+    
+    public func setAreaFill(_ visible: Bool, animated: Bool) {
+        self.chartView.controller?.setAreaFill(visible, animated: animated)
+    }
+    
+    /// Bars stay flat for `delay` seconds, then grow from the baseline.
+    public func growBars(delay: TimeInterval) {
+        self.chartView.controller?.growBars(delay: delay)
+    }
+    
+    /// Line draw-in: the renderer cuts the stroke at `progress`, a mask reveals grid and labels slightly ahead. Nil shows all.
+    public func setPlotReveal(_ progress: CGFloat?) {
+        self.chartView.setPlotReveal(progress)
+        self.chartView.controller?.setPlotReveal(progress)
+    }
+
+    /// See `BaseChartController.giftCurvePoint`; in this node's coordinates.
+    public func giftCurvePoint(lineIndex: Int, x: CGFloat) -> CGPoint? {
+        return self.chartView.controller?.giftCurvePoint(lineIndex: lineIndex, x: x)
+    }
+    
     public func setup(controller: BaseChartController, noInitialZoom: Bool = false) {
+        controller.selectionHandler = self.selectionHandler
+        controller.giftStyle = self.giftStyle
         var displayRange = true
         var zoomToEnding = true
         if let controller = controller as? StepBarsChartController {
@@ -207,5 +265,43 @@ public final class ChartNode: ASDisplayNode {
     
     public func resetInteraction() {
         self.chartView.resetDetailsView()
+    }
+    
+    /// Called only for user interaction with the range slider.
+    public var userDidChangeRange: (() -> Void)? {
+        get {
+            return self.chartView.userDidChangeRange
+        }
+        set {
+            self.chartView.userDidChangeRange = newValue
+        }
+    }
+    
+    /// Same JSON as `createChartController`. Returns false and keeps the old data if the current chart can't show it.
+    @discardableResult
+    public func replaceData(_ data: String, animated: Bool) -> Bool {
+        guard let controller = self.chartView.controller, let jsonData = data.data(using: .utf8) else {
+            return false
+        }
+        var replaced = false
+        ChartsDataManager.readChart(data: jsonData, extraCopiesCount: 0, sync: true, success: { collection in
+            replaced = controller.replaceChartsCollection(collection, animated: animated)
+        }, failure: { _ in
+        })
+        return replaced
+    }
+    
+    /// 0...1 is the whole data.
+    public var visibleRange: ClosedRange<CGFloat>? {
+        return self.chartView.controller?.currentChartHorizontalRangeFraction
+    }
+    
+    public var seriesNames: [String] {
+        return self.chartView.controller?.actualChartsCollection.chartValues.map { $0.name } ?? []
+    }
+    
+    /// Also moves the range slider. 0...1 is the whole data.
+    public func setVisibleRange(_ fraction: ClosedRange<CGFloat>, animated: Bool) {
+        self.chartView.controller?.setChartRange(fraction, animated: animated)
     }
 }

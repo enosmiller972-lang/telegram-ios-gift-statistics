@@ -78,6 +78,13 @@ final class GiftPagerComponent: Component {
         private var component: GiftPagerComponent?
         private var environment: Environment<EnvironmentType>?
         
+        /// Set while a card shows statistics, so horizontal drags go to the charts.
+        var isPagingLocked: Bool = false {
+            didSet {
+                self.scrollView.isScrollEnabled = !self.isPagingLocked
+            }
+        }
+        
         override init(frame: CGRect) {
             self.dimView = UIView()
             self.dimView.backgroundColor = UIColor(white: 0.0, alpha: 0.4)

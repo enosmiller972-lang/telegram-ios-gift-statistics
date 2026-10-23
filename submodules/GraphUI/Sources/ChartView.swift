@@ -59,13 +59,26 @@ class ChartView: UIControl {
     var userDidSelectCoordinateClosure: ((CGPoint) -> Void)?
     var userDidDeselectCoordinateClosure: (() -> Void)?
     
+    /// Scrubbing claims horizontal drags from the surrounding scroll views, like the range slider.
+    var giftStyle: Bool = false
+
     private var _isTracking: Bool = false
     private var touchInitialLocation: CGPoint?
+    private let touchClaim = GiftChartRangeTouchClaim()
+    private var scrubLetGo: Bool = false
     override var isTracking: Bool {
         return self._isTracking
     }
-    
+
+    override func willMove(toWindow newWindow: UIWindow?) {
+        super.willMove(toWindow: newWindow)
+        if newWindow == nil {
+            self.touchClaim.release()
+        }
+    }
+
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        self.scrubLetGo = false
         if let point = touches.first?.location(in: self) {
             let fractionPoint = CGPoint(x: (point.x - chartFrame.origin.x) / chartFrame.width,
                                         y: (point.y - chartFrame.origin.y) / chartFrame.height)
@@ -73,8 +86,26 @@ class ChartView: UIControl {
             self.touchInitialLocation = point
         }
     }
-    
+
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if self.scrubLetGo {
+            return
+        }
+        if self.giftStyle, !self.touchClaim.isHolding, let initialPosition = self.touchInitialLocation, let point = touches.first?.location(in: self) {
+            switch GiftChartRangeTouchClaim.direction(dx: point.x - initialPosition.x, dy: point.y - initialPosition.y) {
+            case .horizontal:
+                self.touchClaim.hold(above: self)
+            case .vertical:
+                // Vertical drag belongs to the card scroll.
+                self.scrubLetGo = true
+                self.touchInitialLocation = nil
+                self._isTracking = false
+                userDidDeselectCoordinateClosure?()
+                return
+            case .undecided:
+                break
+            }
+        }
         if var point = touches.first?.location(in: self) {
             point.x = max(0.0, min(self.frame.width, point.x))
             point.y = max(0.0, min(self.frame.height, point.y))
@@ -89,15 +120,19 @@ class ChartView: UIControl {
     }
     
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        self.touchClaim.release()
         userDidDeselectCoordinateClosure?()
         self.touchInitialLocation = nil
         self._isTracking = false
+        self.scrubLetGo = false
     }
-    
+
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        self.touchClaim.release()
         userDidDeselectCoordinateClosure?()
         self.touchInitialLocation = nil
         self._isTracking = false
+        self.scrubLetGo = false
     }
     
     // MARK: Details View

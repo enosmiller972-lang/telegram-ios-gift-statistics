@@ -29,6 +29,11 @@ class BarsComponentController: GeneralChartComponentController {
     
     private var step: Bool
     
+    var lastSelectedBucket: Int?
+    
+    /// Set while the range is changed from code, so the bars slide instead of jumping.
+    var animatesRangeUpdates = false
+    
     init(isZoomed: Bool,
          mainBarsRenderer: BarChartRenderer,
          horizontalScalesRenderer: HorizontalScalesRenderer,
@@ -49,6 +54,9 @@ class BarsComponentController: GeneralChartComponentController {
         self.previewBarsChartRenderer.optimizationLevel = BaseConstants.barsChartOptimizationLevel
 
         super.init(isZoomed: isZoomed)
+        self.selectionInfoTransform = { [weak self] info in
+            return self?.bucketedSelection(info) ?? info
+        }
     }
     
     override func initialize(chartsCollection: ChartsCollection, initialDate: Date, totalHorizontalRange _: ClosedRange<CGFloat>, totalVerticalRange _: ClosedRange<CGFloat>) {
@@ -103,7 +111,7 @@ class BarsComponentController: GeneralChartComponentController {
         if !isZoomed {
             initialHorizontalRange = updatedRange
         }
-        setupMainChart(horizontalRange: updatedRange, animated: false)
+        setupMainChart(horizontalRange: updatedRange, animated: self.animatesRangeUpdates)
         updateHorizontalLimitLabels(animated: true, forceUpdate: false)
         updateChartVerticalRanges(horizontalRange: updatedRange, animated: true)
     }
@@ -169,7 +177,7 @@ class BarsComponentController: GeneralChartComponentController {
     }
     
     func updateChartVerticalRanges(horizontalRange: ClosedRange<CGFloat>, animated: Bool) {
-        if let range = BarChartRenderer.BarsData.verticalRange(bars: visibleBars,
+        if let range = BarChartRenderer.BarsData.verticalRange(bars: self.barsForVerticalRange(mainBarsRenderer, range: horizontalRange),
                                                                separate: self.step,
                                                                calculatingRange: horizontalRange,
                                                                addBounds: true) {
@@ -193,7 +201,7 @@ class BarsComponentController: GeneralChartComponentController {
             secondaryScalesRenderer?.setVisible(false, animated: animated)
         }
         
-        if let range = BarChartRenderer.BarsData.verticalRange(bars: visibleBars, separate: self.step) {
+        if let range = BarChartRenderer.BarsData.verticalRange(bars: self.barsForVerticalRange(previewBarsChartRenderer, range: previewBarsChartRenderer.horizontalRange.end), separate: self.step) {
             previewBarsChartRenderer.setup(verticalRange: range, animated: animated)
         }
     }
@@ -241,6 +249,19 @@ class BarsComponentController: GeneralChartComponentController {
         return viewModel
     }
     
+    /// Gift-style bars sit left of their date, so pick the slot under the finger rather than the nearest date.
+    override func findClosestDateTo(dateToFind: Date) -> (Date, Int)? {
+        guard self.isGiftStyle else {
+            return super.findClosestDateTo(dateToFind: dateToFind)
+        }
+        let dates = self.chartsCollection.axisValues
+        guard !dates.isEmpty else {
+            return nil
+        }
+        let index = dates.firstIndex(where: { $0 >= dateToFind }) ?? dates.count - 1
+        return (dates[index], index)
+    }
+    
     override var currentMainRangeRenderer: BaseChartRenderer {
         return mainBarsRenderer
     }
@@ -255,6 +276,7 @@ class BarsComponentController: GeneralChartComponentController {
     }
     
     override func hideDetailsView(animated: Bool) {
+        lastSelectedBucket = nil
         super.hideDetailsView(animated: animated)
         
         mainBarsRenderer.setSelectedIndex(nil, animated: animated)
@@ -281,8 +303,8 @@ class BarsComponentController: GeneralChartComponentController {
             let stirng = BaseConstants.headerFullZoomedFormatter.string(from: fromDate)
             self.setChartTitleClosure?(stirng, animated)
         } else {
-            let stirng = "\(BaseConstants.headerMediumRangeFormatter.string(from: fromDate)) - \(BaseConstants.headerMediumRangeFormatter.string(from: toDate))"
-            self.setChartTitleClosure?(stirng, animated)
+            let stirng = self.isGiftStyle ? BaseChartController.giftRangeTitle?(fromDate, toDate) : nil
+            self.setChartTitleClosure?(stirng ?? "\(BaseConstants.headerMediumRangeFormatter.string(from: fromDate)) - \(BaseConstants.headerMediumRangeFormatter.string(from: toDate))", animated)
         }
     }
     

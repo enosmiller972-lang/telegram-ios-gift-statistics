@@ -55,6 +55,7 @@ class ChartVisibilityView: UIView {
             }
             while selectionViews.count < selectedItems.count {
                 let view = ChartVisibilityItemView(frame: bounds)
+                view.giftStyle = self.giftStyle
                 addSubview(view)
                 selectionViews.append(view)
             }
@@ -90,6 +91,14 @@ class ChartVisibilityView: UIView {
                     }
                     self.notifyItemSelection()
                 }
+            }
+        }
+    }
+    
+    var giftStyle: Bool = false {
+        didSet {
+            for view in self.selectionViews {
+                view.giftStyle = self.giftStyle
             }
         }
     }

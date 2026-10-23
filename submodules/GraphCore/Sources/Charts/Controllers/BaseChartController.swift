@@ -160,6 +160,92 @@ public class BaseChartController: ChartThemeContainer {
         return height
     }
     
+    public struct ChartSelectionInfo {
+        public var index: Int
+        public var date: Date
+        public var values: [Double]
+        public var names: [String]
+        public var colors: [GColor]
+        /// Finger position along the plot, 0...1 of its width.
+        public var fingerFraction: CGFloat
+        /// False when the finger moved but the nearest point is the same.
+        public var isNewPoint: Bool
+        /// Set for a bar that groups several days: `date` is the first day, `values` are sums.
+        public var endDate: Date? = nil
+
+        public init(index: Int, date: Date, values: [Double], names: [String], colors: [GColor], fingerFraction: CGFloat, isNewPoint: Bool, endDate: Date? = nil) {
+            self.index = index
+            self.date = date
+            self.values = values
+            self.names = names
+            self.colors = colors
+            self.fingerFraction = fingerFraction
+            self.isNewPoint = isNewPoint
+            self.endDate = endDate
+        }
+    }
+
+    /// Localized date range title for gift-style charts; other charts keep their own formatter.
+    public static var giftRangeTitle: ((Date, Date) -> String)?
+
+    /// Must be set before the chart is shown (`ChartNode.setup(controller:)` sets it from `ChartNode.giftStyle`).
+    public var giftStyle: Bool = false {
+        didSet {
+            self.giftStyleDidChange()
+        }
+    }
+
+    func giftStyleDidChange() {
+    }
+
+    public func pulseLastPoint() {
+    }
+
+    /// Draws only the left `progress` of the plot width with a dot at the stroke head; nil draws everything.
+    public func setPlotReveal(_ progress: CGFloat?) {
+    }
+
+    /// Point of the currently drawn curve at `x` (chart view coordinates, clamped to the curve); nil if nothing was drawn.
+    public func giftCurvePoint(lineIndex: Int, x: CGFloat) -> CGPoint? {
+        return nil
+    }
+
+    public struct ChartPlotGeometry {
+        public var chartFrame: CGRect
+        public var horizontalRange: ClosedRange<CGFloat>
+        public var verticalRange: ClosedRange<CGFloat>
+    }
+
+    /// When set, the chart doesn't draw its own selection and reports it here instead; nil when the selection ends.
+    public var selectionHandler: ((ChartSelectionInfo?) -> Void)?
+
+    public var plotGeometry: ChartPlotGeometry? {
+        return nil
+    }
+
+    /// Moves value labels into a gutter right of the plot (see `ChartNode.setValueGutter`).
+    public func setValueLabelsInGutter(_ inGutter: Bool) {
+    }
+
+    public func setAreaFill(_ visible: Bool, animated: Bool) {
+    }
+
+    public func growBars(delay: TimeInterval) {
+    }
+
+    public var valueFormat: ChartValueFormat?
+
+    /// Morphs the shown chart to new data. Returns false (keeping the old data) if the controller can't.
+    public func replaceChartsCollection(_ collection: ChartsCollection, animated: Bool) -> Bool {
+        return false
+    }
+
+    /// Programmatic range change; also moves the range slider via `chartRangeUpdatedClosure`.
+    public func setChartRange(_ rangeFraction: ClosedRange<CGFloat>, animated: Bool) {
+        self.updateChartRange(rangeFraction, animated: animated)
+        self.chartRangeUpdatedClosure?(rangeFraction, animated)
+    }
+
     public var isChartRangePagingEnabled: Bool = false
     public var minimumSelectedChartRange: CGFloat = 0.085
     public var chartRangePagingClosure: ((Bool, CGFloat) -> Void)? // isEnabled, PageSize
