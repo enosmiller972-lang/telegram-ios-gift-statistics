@@ -20,7 +20,6 @@ final class GiftStatsSalesRows {
 
     private let container: UIView
     private let offset: () -> CGFloat
-    private let contentChanged: () -> Void
     private var rows: [Int: GiftStatsSalesRowView] = [:]
     private var spare: [GiftStatsSalesRowView] = []
     private var component: GiftStatsRecentSalesComponent?
@@ -29,11 +28,10 @@ final class GiftStatsSalesRows {
     /// one that the scroll brought near.
     private var knownCount = 0
 
-    /// `container` is the view the rows are put in (the scroll view of the list), `offset` tells how far it is scrolled, `contentChanged` is called when the look of a row changes by itself (its model picture arrives).
-    init(container: UIView, offset: @escaping () -> CGFloat, contentChanged: @escaping () -> Void) {
+    /// `container` is the view the rows are put in (the scroll view of the list), `offset` tells how far it is scrolled.
+    init(container: UIView, offset: @escaping () -> CGFloat) {
         self.container = container
         self.offset = offset
-        self.contentChanged = contentChanged
     }
 
     /// The row with this number, when it is made.
@@ -146,9 +144,7 @@ final class GiftStatsSalesRows {
     }
 
     private func makeNew() -> GiftStatsSalesRowView {
-        let row = GiftStatsSalesRowView()
-        row.contentChanged = self.contentChanged
-        return row
+        return GiftStatsSalesRowView()
     }
 
     private func takeAway(except kept: Range<Int>) {

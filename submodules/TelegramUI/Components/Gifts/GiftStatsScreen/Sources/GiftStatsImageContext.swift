@@ -1,7 +1,7 @@
 import Foundation
 import CoreImage
 
-/// One shared, thread-safe CIContext for digit blur and fog baking, so GPU resources are built only once.
+/// One shared, thread-safe CIContext for the digit blur, so GPU resources are built only once.
 enum GiftStatsImageContext {
     static let shared = CIContext(options: [.useSoftwareRenderer: false])
 

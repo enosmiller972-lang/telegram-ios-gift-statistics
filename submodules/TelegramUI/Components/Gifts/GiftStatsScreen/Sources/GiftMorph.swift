@@ -114,6 +114,10 @@ public final class GiftMorph {
         let start: CGFloat = toStats ? 0.0 : 1.0
         self.apply(GiftMorphMoment(position: start, time: start))
         let link = CADisplayLink(target: self, selector: #selector(self.tick(_:)))
+        // Full rate on ProMotion, as Telegram's own display links ask (unasked it runs at 60 Hz).
+        if #available(iOS 15.0, *) {
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 60.0, maximum: 120.0, preferred: 120.0)
+        }
         link.add(to: .main, forMode: .common)
         self.link = link
         self.startTime = CACurrentMediaTime()

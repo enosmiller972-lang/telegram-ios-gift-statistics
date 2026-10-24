@@ -37,8 +37,6 @@ final class GiftStatsSalesRowView: UIView {
     private let timeLabel = UILabel()
     private let separator = UIView()
     private var sale: GiftSale?
-    /// Called when the model image arrives after `update`.
-    var contentChanged: (() -> Void)?
     /// nil when the sold gift is unknown.
     var tapped: (() -> Void)? {
         didSet {
@@ -51,9 +49,6 @@ final class GiftStatsSalesRowView: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        self.icon.contentUpdated = { [weak self] in
-            self?.contentChanged?()
-        }
         self.isAccessibilityElement = true
         self.accessibilityTraits = .staticText
         self.addSubview(self.icon)

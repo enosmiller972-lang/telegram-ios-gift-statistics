@@ -6,7 +6,7 @@ import GlassBackgroundComponent
 
 /// Variable blur over the last row of the closed sales log, from none at the top to `maxBlurRadius` at the bottom.
 final class GiftStatsFogView: UIView {
-    /// About 9 pt of Gaussian sigma on screen (`GiftStatsFogBake.sigmaPerRadius`).
+    /// About 9 pt of Gaussian sigma on screen.
     static let maxBlurRadius: CGFloat = 5.5
 
     private let layerDelegate = SimpleLayerDelegate()

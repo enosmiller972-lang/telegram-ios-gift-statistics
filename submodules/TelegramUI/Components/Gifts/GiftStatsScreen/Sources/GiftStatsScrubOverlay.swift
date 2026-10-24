@@ -237,6 +237,10 @@ final class GiftStatsScrubOverlay: UIView {
     private func startLink() {
         if self.link == nil {
             let link = CADisplayLink(target: self, selector: #selector(self.tick))
+            // Full rate on ProMotion, as Telegram's own display links ask (unasked it runs at 60 Hz).
+            if #available(iOS 15.0, *) {
+                link.preferredFrameRateRange = CAFrameRateRange(minimum: 60.0, maximum: 120.0, preferred: 120.0)
+            }
             self.lastTick = CACurrentMediaTime()
             link.add(to: .main, forMode: .common)
             self.link = link

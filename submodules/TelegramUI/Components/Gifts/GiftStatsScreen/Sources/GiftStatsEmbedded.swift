@@ -91,7 +91,7 @@ public final class GiftStatsEmbedded {
         return self.chrome.views
     }
 
-    /// Prewarms the Core Image context used by the sales log fog; call once stats are known to be available.
+    /// Prewarms the Core Image context used by the digit blur; call once stats are known to be available.
     public static func prepare() {
         GiftStatsImageContext.prewarm()
     }

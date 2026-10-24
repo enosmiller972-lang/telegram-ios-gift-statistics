@@ -12,11 +12,8 @@ import ComponentFlow
 import PeerInfoCoverComponent
 
 private final class GiftStatsModelIconTarget: MultiAnimationRenderTarget {
-    var updated: (() -> Void)?
-
     override func transitionToContents(_ contents: AnyObject, didLoop: Bool) {
         self.contents = contents
-        self.updated?()
     }
 }
 
@@ -41,8 +38,6 @@ final class GiftStatsModelIconView: UIView {
     private let target = GiftStatsModelIconTarget()
     private var fileId: Int64?
     private var disposable: Disposable?
-    /// Invalidates snapshots taken of the row.
-    var contentUpdated: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -60,9 +55,6 @@ final class GiftStatsModelIconView: UIView {
         self.coverHost.isHidden = true
         self.insertSubview(self.coverHost, at: 0)
         self.layer.addSublayer(self.target)
-        self.target.updated = { [weak self] in
-            self?.contentUpdated?()
-        }
     }
 
     required init?(coder: NSCoder) {
@@ -119,7 +111,6 @@ final class GiftStatsModelIconView: UIView {
             }
             CATransaction.commit()
             self.setNeedsLayout()
-            self.contentUpdated?()
         }
         self.update(context: context, file: file)
     }

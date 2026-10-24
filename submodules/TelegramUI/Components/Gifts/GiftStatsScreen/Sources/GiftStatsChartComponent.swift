@@ -328,6 +328,10 @@ final class GiftStatsChartComponent: Component {
             self.introStart = CACurrentMediaTime()
             self.introLink?.invalidate()
             let link = CADisplayLink(target: self, selector: #selector(self.introTick))
+            // Full rate on ProMotion, as Telegram's own display links ask (unasked it runs at 60 Hz).
+            if #available(iOS 15.0, *) {
+                link.preferredFrameRateRange = CAFrameRateRange(minimum: 60.0, maximum: 120.0, preferred: 120.0)
+            }
             link.add(to: .main, forMode: .common)
             self.introLink = link
         }

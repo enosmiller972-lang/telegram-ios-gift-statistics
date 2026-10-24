@@ -34,19 +34,37 @@ public enum GiftMorphCapture {
     // layer.render instead of afterScreenUpdates snapshots, which would commit and flash views shown by withShown.
     public static func picture(of view: UIView, rect: CGRect? = nil) -> UIView? {
         let area = rect ?? view.bounds
-        guard area.width > 0.0, area.height > 0.0 else {
+        guard let image = self.image(size: area.size, draw: { context in
+            context.translateBy(x: -area.minX, y: -area.minY)
+            view.layer.render(in: context)
+        }) else {
             return nil
-        }
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = UIScreenScale
-        format.opaque = false
-        let image = UIGraphicsImageRenderer(size: area.size, format: format).image { context in
-            context.cgContext.translateBy(x: -area.minX, y: -area.minY)
-            view.layer.render(in: context.cgContext)
         }
         let picture = UIImageView(image: image)
         picture.frame = CGRect(origin: .zero, size: area.size)
         return picture
+    }
+
+    // Exactly the pixels of the frame, rounded. Left to the renderer, a height like 39.666…7 pt gets a pixel row more
+    // (119.000…1 rounded up); squeezed back into its frame, the picture then sits half a pixel off the real view
+    // and steps into place when the real view takes over.
+    private static func image(size: CGSize, draw: (CGContext) -> Void) -> UIImage? {
+        let scale = UIScreenScale
+        let pixels = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        guard pixels.width > 0.0, pixels.height > 0.0 else {
+            return nil
+        }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: pixels, format: format).image { context in
+            context.cgContext.scaleBy(x: scale, y: scale)
+            // A scaled-down image (an avatar of 180 px in 66) the way the screen draws it (the layer's linear filter);
+            // the default smoother filter would make it softer in the morph than after it.
+            context.cgContext.interpolationQuality = .low
+            draw(context.cgContext)
+        }
+        return image.cgImage.map { UIImage(cgImage: $0, scale: scale, orientation: .up) }
     }
 
     public static func thing(_ picture: UIView, standingFor view: UIView, in card: UIView, isFrozen: Bool) -> GiftMorphThing {
@@ -65,19 +83,15 @@ public enum GiftMorphCapture {
     // Subviews only, without the fill and rim.
     public static func picture(onFlat flat: GiftFlatTonalView, in card: UIView, isFrozen: Bool) -> GiftMorphThing? {
         let area = flat.bounds
-        guard area.width > 0.0, area.height > 0.0 else {
-            return nil
-        }
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = UIScreenScale
-        format.opaque = false
-        let image = UIGraphicsImageRenderer(size: area.size, format: format).image { context in
+        guard let image = self.image(size: area.size, draw: { context in
             for subview in flat.subviews where !subview.isHidden && subview.alpha > 0.0 && !(subview is GiftRimView) {
-                context.cgContext.saveGState()
-                context.cgContext.translateBy(x: subview.frame.minX, y: subview.frame.minY)
-                subview.layer.render(in: context.cgContext)
-                context.cgContext.restoreGState()
+                context.saveGState()
+                context.translateBy(x: subview.frame.minX, y: subview.frame.minY)
+                subview.layer.render(in: context)
+                context.restoreGState()
             }
+        }) else {
+            return nil
         }
         let picture = UIImageView(image: image)
         picture.frame = CGRect(origin: .zero, size: area.size)

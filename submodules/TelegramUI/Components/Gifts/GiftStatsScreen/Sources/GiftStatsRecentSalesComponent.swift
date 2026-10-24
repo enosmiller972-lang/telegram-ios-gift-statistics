@@ -81,14 +81,7 @@ final class GiftStatsRecentSalesComponent: Component {
         private var closedFadeHeight: CGFloat?
         private lazy var rowSet = GiftStatsSalesRows(container: self.list.contentView, offset: { [weak self] in
             return self?.list.contentOffset ?? 0.0
-        }, contentChanged: { [weak self] in
-            self?.fogRevision += 1
-            self?.scheduleFogBake()
         })
-
-        private let fogBaker = GiftStatsFogBaker()
-        private var fogRevision = 0
-        private var isFogBakeScheduled = false
 
         var buttonCenterY: CGFloat? {
             return self.button.superview == nil ? nil : self.button.center.y
@@ -108,84 +101,42 @@ final class GiftStatsRecentSalesComponent: Component {
             return GiftMorphCapture.picture(of: self)
         }
 
-        /// The closed rows, matched row by row with the card's table; each yields a snapshot and a separate price.
+        /// The closed rows, matched row by row with the card's table. Each row morphs with its own views, and the last one
+        /// under a fog of its own, so the real list takes over without a change.
         func morphRows(in card: UIView, isFrozen: Bool) -> [GiftMorphThing] {
             var things: [GiftMorphThing] = []
+            let foggedIndex = self.closedFadeHeight != nil && !GiftStatsEnvironment.reduceTransparency ? self.rowSet.madeCount - 1 : nil
             for index in 0 ..< GiftStatsRecentSalesComponent.collapsedCount {
-                // The fogged last row is a single baked image, price included.
-                let fogged = self.closedFadeHeight != nil && !GiftStatsEnvironment.reduceTransparency && index == self.rowSet.madeCount - 1 ? self.rowSet.row(at: index).flatMap { self.foggedPicture(of: $0, index: index, isFrozen: isFrozen) } : nil
-                guard let row = self.rowSet.row(at: index), let picture = fogged ?? row.morphPicture() else {
+                guard let row = self.rowSet.row(at: index) else {
                     break
                 }
                 let frame = row.convert(row.bounds, to: card)
-                let path = GiftMorphThing.Path.row(index)
-                // Apply the list fade too, so nothing jumps when the real list takes over.
-                picture.layer.mask = self.fadeMask(forRow: index)
-                if isFrozen {
-                    things.append(GiftMorphThing(picture: picture, frame: frame, path: path))
-                } else {
-                    things.append(GiftMorphThing(view: picture, path: path, home: { [weak row, weak card] in
-                        guard let row, let card else {
-                            return frame
-                        }
-                        return row.convert(row.bounds, to: card)
-                    }))
-                }
-                if fogged != nil {
-                    continue
-                }
-                let price = row.morphPriceThing(path: path, in: card, isFrozen: isFrozen)
-                price.view.layer.mask = self.fadeMask(forRow: index)
-                things.append(price)
+                let content = UIView(frame: CGRect(origin: .zero, size: row.bounds.size))
+                content.isUserInteractionEnabled = false
+                // The list fade too, as the list's mask fades the real row.
+                content.layer.mask = self.fadeMask(forRow: index)
+                let moves = row.morphMoves(into: content)
+                let view = index == foggedIndex ? GiftStatsRecentSalesComponent.View.fogged(content) : content
+                things.append(GiftMorphThing(view: view, path: .row(index), home: isFrozen ? { frame } : { [weak row, weak card] in
+                    guard let row, let card else {
+                        return frame
+                    }
+                    return row.convert(row.bounds, to: card)
+                }, activate: moves.activate, release: moves.release))
             }
             return things
         }
 
-        /// Cached bake if current; on the way in an image view filled when the background bake ends; when frozen, baked now.
-        private func foggedPicture(of row: GiftStatsSalesRowView, index: Int, isFrozen: Bool) -> UIImageView? {
-            guard let component = self.component else {
-                return GiftStatsFogBake.picture(of: row)
-            }
-            let source = GiftStatsFogBaker.Source(component: component, revision: self.fogRevision, size: row.bounds.size)
-            if isFrozen {
-                return self.fogBaker.imageNow(for: source, flat: { GiftStatsFogBake.flatImage(of: row) }).map { GiftStatsFogBake.view(of: $0, size: source.size) }
-            }
-            if let image = self.fogBaker.image(for: source) {
-                return GiftStatsFogBake.view(of: image, size: source.size)
-            }
-            guard let flat = GiftStatsFogBake.flatImage(of: row) else {
-                return nil
-            }
-            self.fogBaker.start(source, flat: flat)
-            return self.fogBaker.picture(for: source, flat: flat, within: self.fogDeadline(forRow: index))
-        }
-
-        /// Slightly before the row's swap window in the morph, when it first becomes visible.
-        private func fogDeadline(forRow index: Int) -> Double {
-            let start = Double(GiftMorphTiming.rows.start + CGFloat(index) * GiftMorphTiming.rowStep)
-            return start * GiftMorphTiming.duration * max(1.0, UIView.animationDurationFactor) * 0.8
-        }
-
-        /// Deferred one run loop turn so the row is laid out; the blur runs in the background.
-        private func scheduleFogBake() {
-            guard self.closedFadeHeight != nil, !GiftStatsEnvironment.reduceTransparency, !self.isFogBakeScheduled else {
-                return
-            }
-            self.isFogBakeScheduled = true
-            DispatchQueue.main.async { [weak self] in
-                guard let self else {
-                    return
-                }
-                self.isFogBakeScheduled = false
-                guard let component = self.component, self.closedFadeHeight != nil, !GiftStatsEnvironment.reduceTransparency, let row = self.rowSet.row(at: self.rowSet.madeCount - 1) else {
-                    return
-                }
-                let source = GiftStatsFogBaker.Source(component: component, revision: self.fogRevision, size: row.bounds.size)
-                guard !self.fogBaker.isMade(source), let flat = GiftStatsFogBake.flatImage(of: row) else {
-                    return
-                }
-                self.fogBaker.start(source, flat: flat)
-            }
+        /// The row under a live fog, the same as `fog` over the real list: a picture of the blur would not match it.
+        private static func fogged(_ content: UIView) -> UIView {
+            let holder = UIView(frame: content.frame)
+            holder.isUserInteractionEnabled = false
+            holder.addSubview(content)
+            let fog = GiftStatsFogView(frame: holder.bounds)
+            fog.update(size: holder.bounds.size)
+            fog.setShown(true, duration: 0.0)
+            holder.addSubview(fog)
+            return holder
         }
 
         private func fadeMask(forRow index: Int) -> CALayer? {
@@ -310,7 +261,6 @@ final class GiftStatsRecentSalesComponent: Component {
             } else {
                 self.button.removeFromSuperview()
             }
-            self.scheduleFogBake()
             return CGSize(width: width, height: height)
         }
     }
